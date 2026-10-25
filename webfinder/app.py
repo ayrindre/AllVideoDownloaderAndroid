@@ -82,7 +82,16 @@ def create_app() -> FastAPI:
         manager.attach(hub.broadcast)
 
     # Static frontend — index.html gets no-cache so dev iteration is instant.
-    app.mount("/static", StaticFiles(directory=WEB_DIR), name="static")
+    # JS/CSS get `no-cache` too (= always revalidate, cheap 304s): WebView2's
+    # heuristic caching otherwise serves stale app.js for hours after a git pull,
+    # which looks exactly like "the update did nothing".
+    class _RevalidateStatic(StaticFiles):
+        async def get_response(self, path, scope):  # type: ignore[override]
+            resp = await super().get_response(path, scope)
+            resp.headers.setdefault("cache-control", "no-cache")
+            return resp
+
+    app.mount("/static", _RevalidateStatic(directory=WEB_DIR), name="static")
 
     @app.get("/")
     async def index():

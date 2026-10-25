@@ -38,7 +38,10 @@ def base_yt_opts(extra: dict | None = None) -> dict:
     and age/region-gated videos.
     """
     opts = {"quiet": True, "no_warnings": True, "noprogress": True,
-            "socket_timeout": 30, "retries": 3, "nocheckcertificate": True}
+            "socket_timeout": 30, "retries": 3, "nocheckcertificate": True,
+            # A real browser UA on the raw HTTP layer: several CDNs downgrade
+            # the offered formats purely on UA sniffing.
+            "http_headers": {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"}}
     browser = (settings.get("ytdlp_browser_cookies") or "").strip()
     if browser:
         opts["cookiesfrombrowser"] = (browser,)

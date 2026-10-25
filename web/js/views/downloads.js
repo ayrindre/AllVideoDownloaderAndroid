@@ -101,7 +101,10 @@
     });
     row.querySelector(".dl-open").addEventListener("click", () => {
       const j = S.jobs.get(id());
-      window.API.openPath(j?.filepath || "").catch(() => window.UI.toast("Opening folders is only available in the desktop app.", "warn"));
+      // the backend runs on this same machine, so folder reveal works in BOTH modes;
+      // if the tracked path went stale (post-merge rename), open the downloads dir
+      window.API.openPath(j?.filepath || "").catch(() =>
+        window.API.openPath("").catch((e2) => window.UI.toast(String(e2?.message || "Could not open the folder."), "warn")));
     });
     row.querySelector(".dl-reveal").addEventListener("click", async () => {
       const j = S.jobs.get(id()); if (j) { await window.UI.copyText(j.url); window.UI.toast("Source URL copied.", "ok", { icon: "copy" }); }

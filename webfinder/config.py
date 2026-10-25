@@ -30,9 +30,11 @@ DEFAULTS: dict[str, Any] = {
         "yandex": False,
         "mojeek": True,
     },
-    "result_limit": 60,
+    "result_limit": 100,
     "safe_search": False,                # OFF by default — the user sees everything
-    "vertical_mode": True,               # image/video chips use true media verticals
+    # NOTE: the old media-vertical kill-switch was deliberately removed — one
+    # media chip ALWAYS routes to its dedicated indexes. A stale
+    # "vertical_mode": false in an existing settings.json must never resurrect it.
     "proxy": "",                         # optional http/socks proxy for scraping
     "resolve_pages": True,               # crawl result pages for direct file links
     # --- media -----------------------------------------------------------

@@ -324,28 +324,60 @@ class DownloadManager:
                 self.publish(job)
 
         from .media import base_yt_opts
+        parent = Path(str(job.filepath)).parent
+        stem = Path(str(job.filename)).stem[:120] or "download"
+        # Fixed basename (NOT %(title)s): the final file is predictably
+        # <stem>.<ext>, so open-folder / reveal / size-reconcile all find it.
         core: dict[str, Any] = {
             "progress_hooks": [hook],
             "quiet": True, "no_warnings": True, "noprogress": True,
-            "outtmpl": str(Path(str(job.filepath)).parent / "%(title).150B.%(ext)s"),
+            "outtmpl": str(parent / (stem + ".%(ext)s")),
             "format": job.meta.get("format") or "bv*+ba/b",
             "merge_output_format": settings.get("default_container", "mp4"),
             "concurrent_fragment_downloads": 4,
+            "windowsfilenames": True,
         }
-        # default attempt, then a mobile-player retry (beats many YouTube bot walls)
-        attempts = [base_yt_opts(core),
-                    base_yt_opts({**core, "extractor_args": {"youtube": {"player_client": ["android", "tv"]}}})]
+        # YouTube serves anonymous WEB clients a 640×480-only stream map
+        # ("quality ignores my selection" bug) — lead with the mobile/TV clients
+        # that expose full-resolution formats, then fall back to web.
+        attempts = [base_yt_opts({**core, "extractor_args":
+                                 {"youtube": {"player_client": ["android", "tv", "web"]}}}),
+                    base_yt_opts(core)]
         last_err: Exception | None = None
         for opts in attempts:
             try:
                 with yt_dlp.YoutubeDL(opts) as ydl:
                     ydl.download([job.url])
+                self._settle_ytdlp_file(job, parent, stem)
                 return
             except yt_dlp.utils.DownloadCancelled:
                 raise asyncio.CancelledError() from None
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 — retry / final error below
                 last_err = exc
-        raise RuntimeError(f"yt-dlp failed: {last_err}")
+        # both errored but attempt 1 may still have produced a complete file
+        settled = self._settle_ytdlp_file(job, parent, stem)
+        if last_err is not None and not settled:
+            raise RuntimeError(f"yt-dlp failed: {last_err}")
+
+    def _settle_ytdlp_file(self, job: DownloadJob, parent: Path, stem: str) -> bool:
+        """Point the job at the REAL file yt-dlp left on disk (extension comes
+        from the site: mp4/mkv/webm…), then sync size with the truth.
+        Returns True when a real, non-trivial file was located."""
+        try:
+            finals = [f for f in parent.glob(stem + ".*")
+                      if f.suffix not in (".part", ".ytdl") and f.is_file()]
+            if finals and max(f.stat().st_size for f in finals) > 1024:
+                real = max(finals, key=lambda f: f.stat().st_size)
+                job.filename = real.name
+                job.filepath = str(real)
+                size = real.stat().st_size
+                if job.unit == "bytes" and size:
+                    job.done = job.total = size
+                    job.progress_pct = 100.0
+                return True
+        except OSError:
+            pass
+        return False
 
     # ------------------------------------------------------------------
     # Worker: simulated transfer (demo mode / offline & blocked networks)

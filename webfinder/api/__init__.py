@@ -102,16 +102,26 @@ async def put_settings(body: SettingsPatch):
 async def open_path(path: str = ""):
     """Reveal a download (or the download folder) in the OS file manager."""
     target = Path(path) if path else Path(settings.get("download_dir", "."))
+    revealed_file = target.is_file()
     if not target.exists():
-        raise HTTPException(404, "Path does not exist")
-    if sys.platform == "win32":
-        flag = "/select," if target.is_file() else ""
-        subprocess.Popen(["explorer", flag, str(target)])
-    elif sys.platform == "darwin":
-        subprocess.Popen(["open", "-R" if target.is_file() else "", str(target)])
-    else:
-        subprocess.Popen(["xdg-open", str(target if target.is_dir() else target.parent)])
-    return {"ok": True}
+        # stale path (renamed after merge, cleaned up…) — open the closest
+        # existing parent instead of dead-ending
+        revealed_file = False
+        while not target.exists() and target.parent != target:
+            target = target.parent
+    if not target.exists():
+        raise HTTPException(500, "Download folder not found — check Settings → Downloads")
+    try:
+        if sys.platform == "win32":
+            # explorer needs ONE token: "/select,C:\path" — split args silently no-op
+            subprocess.Popen(["explorer", f"/select,{target}" if revealed_file else str(target)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R" if revealed_file else "", str(target)])
+        else:
+            subprocess.Popen(["xdg-open", str(target if target.is_dir() else target.parent)])
+    except OSError as exc:
+        raise HTTPException(500, f"No file manager available to launch ({exc})") from exc
+    return {"ok": True, "opened": str(target)}
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +169,7 @@ async def search(body: SearchRequest):
 
     # ── vertical mode: ONE media-file type selected → query dedicated indexes.
     #    No web fallback ever: garbage pages are worse than an explained empty state.
-    elif cfg.get("vertical_mode") and len(body.types) == 1 and body.types[0] in VERTICAL_ROUTES:
+    elif len(body.types) == 1 and body.types[0] in VERTICAL_ROUTES:
         mode, fkey, fn = VERTICAL_ROUTES[body.types[0]]
         vf = (body.filters or {}).get(fkey) or {}
         vdata = await fn(body.query, vf, limit, safe, cfg.get("proxy", ""))

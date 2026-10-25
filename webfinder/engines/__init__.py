@@ -150,32 +150,53 @@ async def _ddg_lite(client: httpx.AsyncClient, query: str, limit: int, safe: boo
 
 async def search_bing(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
     # Bing's RSS endpoint is dramatically more scraper-friendly than its HTML.
+    # It caps ~30 rows per page — page through with `first=` for real volume.
     out: list[dict] = []
-    params = {"q": query, "count": min(max(limit, 30), 100), "setlang": "en", "format": "rss"}
-    if not safe:
-        params["adlt"] = "off"
-    resp = await client.get("https://www.bing.com/search", params=params)
-    resp.raise_for_status()
-    for m in re.finditer(r"<item>\s*<title>(.*?)</title>\s*<link>(.*?)</link>\s*<description>(.*?)</description>", resp.text, re.S):
-        url = unescape(m.group(2))
-        out.append(_mk_result(url, _clean(unescape(m.group(1))), _clean(unescape(m.group(3)))))
-        if len(out) >= limit:
+    seen: set[str] = set()
+    per = 30
+    rss_failed = False
+    page = 0
+    while len(out) < limit and page < 4:
+        params = {"q": query, "count": per, "first": 1 + page * per,
+                  "setlang": "en", "format": "rss"}
+        if not safe:
+            params["adlt"] = "off"
+        try:
+            resp = await client.get("https://www.bing.com/search", params=params)
+            resp.raise_for_status()
+        except httpx.HTTPError:
+            rss_failed = True
             break
+        added = 0
+        for m in re.finditer(r"<item>\s*<title>(.*?)</title>\s*<link>(.*?)</link>\s*<description>(.*?)</description>", resp.text, re.S):
+            url = unescape(m.group(2))
+            if url in seen:
+                continue
+            seen.add(url)
+            added += 1
+            out.append(_mk_result(url, _clean(unescape(m.group(1))), _clean(unescape(m.group(3)))))
+            if len(out) >= limit:
+                break
+        if added == 0:
+            break
+        page += 1
     if out:
         return out
-    # RSS can be disabled — fall back to HTML scraping.
+    # RSS can be disabled or blocked — fall back to HTML scraping (one page).
     html_params = {"q": query, "count": min(limit, 30), "setlang": "en"}
     if not safe:
         html_params["adlt"] = "off"
     resp = await client.get("https://www.bing.com/search", params=html_params)
     for m in re.finditer(r'<li class="b_algo".*?<h2><a href="([^"]+)"[^>]*>(.*?)</a>.*?(?:<p[^>]*>(.*?)</p>)?', resp.text, re.S):
         url = _strip_redirect(unescape(m.group(1)))
-        if not url.startswith("http"):
+        if not url.startswith("http") or url in seen:
             continue
+        seen.add(url)
         out.append(_mk_result(url, _clean(m.group(2)), _clean(m.group(3) or "")))
         if len(out) >= limit:
             break
     return out
+
 
 
 GOOGLE_CONSENT_COOKIES = {"CONSENT": "YES+cb.20220419-08-p0.en.LX.ALL",
@@ -216,12 +237,22 @@ async def search_google(client: httpx.AsyncClient, query: str, limit: int, safe:
     # bot-walled networks (httpx's JA3 gets served a consent/captcha shell).
     if tls.available():
         try:
-            status, text, final = await tls.google_get(
-                "https://www.google.com/search", params=params,
-                cookies=GOOGLE_CONSENT_COOKIES, proxy=settings.get("proxy") or "")
-            out = _parse_google_html(text, limit)
-            if out:
-                return out
+            acc: list[dict] = []
+            seen_u: set[str] = set()
+            for start in (0, 30, 60, 90):
+                if start >= max(limit, 30):
+                    break
+                status, text, final = await tls.google_get(
+                    "https://www.google.com/search", params={**params, "start": start},
+                    cookies=GOOGLE_CONSENT_COOKIES, proxy=settings.get("proxy") or "")
+                page = _parse_google_html(text, limit)
+                fresh = [r for r in page if r["url"] not in seen_u]
+                seen_u.update(r["url"] for r in fresh)
+                acc.extend(fresh)
+                if len(acc) >= limit or not page or len(page) < 8:
+                    break
+            if acc:
+                return acc[:limit]
         except Exception:  # noqa: BLE001 — fall through to the httpx attempts
             pass
     client.cookies.update(GOOGLE_CONSENT_COOKIES)
@@ -264,29 +295,38 @@ async def search_yandex(client: httpx.AsyncClient, query: str, limit: int, safe:
 
 
 async def search_mojeek(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
-    resp = await client.get("https://www.mojeek.com/search", params={"q": query})
-    if resp.status_code in (403, 429):
-        raise RuntimeError(f"Mojeek anti-bot ({resp.status_code}) — consider a proxy or disable it")
-    resp.raise_for_status()
+    """Mojeek ~10 hits/page — walk up to 3 pages and merge."""
     out: list[dict] = []
+    seen: set[str] = set()
     patterns = (
         r'<a class="ob"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?(?:<p>(.*?)</p>)?',       # 2023 layout
         r'<a[^>]*class="title"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',                     # current layout
         r'<h2 class="title[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>\s*</h2>',     # nested variant
     )
-    rx = next((re.compile(p, re.S) for p in patterns if re.search(p, resp.text)), None)
-    if rx is None:
-        return []
-    for m in rx.finditer(resp.text):
-        url = _strip_redirect(unescape(m.group(1)))
-        if not url.startswith("http"):
-            continue
-        snippet = _clean(m.group(3)) if (m.lastindex or 0) >= 3 else ""
-        out.append(_mk_result(url, _clean(m.group(2)), snippet))
-        if len(out) >= limit:
+    for pno in range(1, 4):
+        resp = await client.get("https://www.mojeek.com/search", params={"q": query, "p": pno})
+        if resp.status_code in (403, 429):
+            if pno == 1:
+                raise RuntimeError(f"Mojeek anti-bot ({resp.status_code}) — consider a proxy or disable it")
+            break
+        resp.raise_for_status()
+        rx = next((re.compile(p, re.S) for p in patterns if re.search(p, resp.text)), None)
+        if rx is None:
+            break  # empty page / layout changed — stop paging
+        added = 0
+        for m in rx.finditer(resp.text):
+            url = _strip_redirect(unescape(m.group(1)))
+            if not url.startswith("http") or url in seen:
+                continue
+            seen.add(url)
+            added += 1
+            snippet = _clean(m.group(3)) if (m.lastindex or 0) >= 3 else ""
+            out.append(_mk_result(url, _clean(m.group(2)), snippet))
+            if len(out) >= limit:
+                break
+        if added == 0:
             break
     return out
-
 
 ENGINES: dict[str, Callable] = {
     "google": search_google,

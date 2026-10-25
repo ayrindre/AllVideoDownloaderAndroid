@@ -57,7 +57,7 @@ webfinder/
 | `GET /api/downloads` | job list (bootstrap after (re)connect) |
 | `POST /api/downloads/{id}/pause·resume·cancel·retry` | job control (cooperative events, not thread-killing) |
 | `DELETE /api/downloads/{id}` · `POST /api/downloads/clear` | list management |
-| `POST /api/system/open-path?path=` | reveal file/folder in Explorer / Finder / xdg |
+| `POST /api/system/open-path?path=` | reveal file/folder in Explorer / Finder / xdg; a missing path walks up to the nearest existing directory — works in browser mode too (the server is the user's machine) |
 | `GET /ws` | server→client events: `bootstrap`, `jobs.list`, `job.update` (≈4/s per active job) |
 | `GET /api/docs` | interactive OpenAPI docs |
 
@@ -84,7 +84,7 @@ WS client auto-falls back to `GET /api/downloads` polling (1.4 s) whenever the s
 |---|---|
 | `http` | httpx streaming, 256 KB chunks, Content-Range/Length totals, Range resume |
 | `hls` | ffprobe duration → `ffmpeg -progress pipe:1 -i URL [-headers…] -c copy [-bsf:a aac_adtstoasc -movflags +faststart] out.mp4` (`libx264` when re-encode requested / container demands it); progress = decoded `out_time_us` clock |
-| `ytdlp` | `yt_dlp.YoutubeDL({...}).download()` in a thread; `progress_hooks` push into the same `job.update` stream; format strings like `bestvideo[height<=1080]+bestaudio/best[height<=1080]`; `DownloadCancelled` for cancel |
+| `ytdlp` | `yt_dlp.YoutubeDL({...}).download()` in a thread; `progress_hooks`, first **android/tv** player client (web client is 480-capped for bots), fixed-basename `outtmpl`, then `_settle_ytdlp_file()` re-points the job at the REAL merged file (glob `<stem>.*`, >1 KB, corrects extension) and reconciles size with `st_size` push into the same `job.update` stream; format strings like `bestvideo[height<=1080]+bestaudio/best[height<=1080]`; `DownloadCancelled` for cancel |
 | `sim` | deterministic-ish fake transfer (seeded RNG wobble), writes a real placeholder file, drives the identical UI path |
 
 ### Vertical search (`core/verticals.py`)

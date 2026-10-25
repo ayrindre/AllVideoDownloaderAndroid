@@ -63,7 +63,10 @@ Module map and API reference: **[ARCHITECTURE.md](ARCHITECTURE.md)**
 
 ### True media verticals (images · videos · torrents · e-books · archives)
 Selecting a single file-type chip switches from web search to that type's dedicated
-*index sources*, so you get the files themselves — not pages about them:
+*index sources*, so you get the files themselves — not pages about them. This routing is
+**unconditional** — the old `vertical_mode` kill-switch was removed because a stale
+`"vertical_mode": false` in an existing `settings.json` silently degraded every media
+vertical back to plain web search:
 
 | | Sources | Direct fields | Filters |
 |---|---|---|---|
@@ -123,6 +126,11 @@ direct file links* — those get their own **Copy link / Download** buttons on t
    resolution table is returned to a *format picker card*; the chosen
    `bestvideo[height<=1080]+bestaudio/best[height<=1080]` string streams through yt-dlp's API
    with `progress_hooks` feeding the same live UI pipeline as every other job.
+   The download **leads with the `android`/`tv` player clients** (the anonymous `web` client is
+   served a 640×480-capped stream map — that is why "1080p" used to arrive as 480p), a real
+   browser `User-Agent` rides every request, and output uses a **fixed basename** (`<title>.%(ext)s`
+   is *not* used): when the job settles, the app points itself at the real merged file on disk,
+   correcting extension drift (`.webm`→`.mp4`) so reveal-in-folder, size math and stats all agree.
 4. **Magnet** → copied/opened with your torrent client (never faked as a direct file).
 5. **Extraction refused** (YouTube's "Sign in to confirm you're not a bot", age/region
    gates) → the analyzer now says so: a red card quoting yt-dlp's own error, with the two
@@ -173,6 +181,10 @@ iscc build\installer.iss            # → Setup wizard (optional bundled ffmpeg 
 | Window "hangs" / log floods `AccessibilityObject… recursion` | Older builds exposed the window object on the `js_api` bridge, which pywebview recursively scans — fixed (bridge now uses a private `_window`; `tools/test_desktop_contract.py` guards it). Any machine can use `browser.bat` as an instant escape hatch. |
 | Console flashes and closes on `run.py` double-click | Use **`run.bat`** (manages the venv and keeps the window open on errors). `run.py` with a bare system Python now pauses with instructions instead of vanishing. |
 | `A WebFinder backend is already running` | That is intentional: `run.py` detects a live backend on the port and attaches the browser to it instead of double-binding (no more `Only one usage of each socket address`). |
+| "Open folder" said *only available in the desktop app* | That toast was a catch-all, not the truth: the folder was tracked under the *planned* filename while yt-dlp's merge renames the file, so the reveal call 404'd. Fixed on both sides — settled real paths + a reveal that walks up to the nearest existing folder and opens the downloads dir as last resort (works in browser mode too: the server is your machine). |
+| Verticals (image/video/torrent/ebook/archive) behave like plain web search after a pull | Two causes, both fixed: a stored `vertical_mode:false` gate (removed — routing is now unconditional) and WebView2 serving **cached stale JS** (`/static` now sends `Cache-Control: no-cache` and revalidates via ETag). Restart the app once after pulling to pick both up. |
+| Stats "Saved" doesn't match the files on disk | Completed jobs now reconcile `done`/`total` to the real `st_size` after the final rename; in-progress jobs intentionally show transfer bytes, and time-based (simulated) jobs never count into "Saved". |
+| Few web results | Web engines now page: Bing RSS `first=` up to 4 pages, Google up to 4 `start=` pages on the fingerprinted path, Mojeek 3 pages; default `result_limit` raised 60→100. Engines you unchecked in Settings stay unchecked — the strip shows what actually ran. |
 | Copy button "does nothing" on media cards | Fixed: handlers now capture `e.currentTarget` before `await` (the DOM nulls it after dispatch). |
 | Dragging the titlebar didn't move the window / maximize never restored | Fixed: header carries pywebview's `.pywebview-drag-region` selector (CSS `-webkit-app-region` is a no-op in WebView2) and the bridge reads the LIVE native `WindowState` instead of pywebview's static `maximized` flag. Double-click the titlebar toggles maximize too. |
 | Proxy env vars make the app ignore its own localhost | All self-probes (`run.py`, desktop launcher) now bypass the system proxy (`ProxyHandler({{})}`). |
