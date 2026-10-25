@@ -17,7 +17,7 @@ py -3 -m venv .venv 2>nul || python -m venv .venv || (echo [error] python not fo
 if not exist ".venv\Scripts\python.exe" (echo [error] venv creation failed. & pause & exit /b 1)
 
 :check_deps
-".venv\Scripts\python.exe" -c "import fastapi,uvicorn,httpx,yarl" 2>nul
+".venv\Scripts\python.exe" -c "import fastapi,uvicorn,httpx,yarl,curl_cffi" 2>nul
 if not errorlevel 1 goto :run
 echo [WebFinder] Installing missing dependencies...
 ".venv\Scripts\pip.exe" install -r requirements.txt --disable-pip-version-check
