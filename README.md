@@ -4,12 +4,20 @@
 
 Search Google / Bing / DuckDuckGo / Yandex / Mojeek for **videos, images, torrents, magnets, installers and archives**, grab direct download links for IDM, capture `.m3u8` streams with **FFmpeg**, and paste any media URL (YouTube & friends) into the **Smart Direct Link** module powered by **yt-dlp** — all inside one buttery-smooth, hardware-accelerated window.
 
+**Windows — double-click [`run.bat`](run.bat).** It creates `.venv`, installs
+requirements (and yt-dlp) on first run, then launches the app — no commands needed.
+
+Or manually:
+
 ```
 python -m venv .venv
 .venv\Scripts\activate            # Windows   (source .venv/bin/activate on Linux/macOS)
 pip install -r requirements.txt
 python run.py                     # → frameless pywebview window (falls back to browser)
 ```
+
+To produce a single-file `dist\WebFinder.exe`, double-click [`build.bat`](build.bat)
+(it installs PyInstaller into the venv and runs `build/webfinder.spec`).
 
 > The UI speaks **English only**, by design, everywhere.
 
@@ -52,6 +60,14 @@ The architecture keeps the frontend **100% HTTP + WebSocket** (`/api/*`, `/ws`) 
 Module map and API reference: **[ARCHITECTURE.md](ARCHITECTURE.md)**
 
 ## 3. How the smart logic works
+
+### Interaction model
+Typing a **bare URL into the main search box routes it straight into the Smart Direct
+Link analyzer** (that's what it is — not a search query). Once a search runs, the hero
+folds into a compact sticky command bar: the query stays editable, and the file-type
+chips + engine pills stay one click from the results — toggling a chip re-runs the search
+automatically. Each section (Search / Direct / Downloads / Settings) is a true page —
+never stacked.
 
 ### Multi-engine search + dork operators
 `core/dorks.py` maps each file-type chip to real search operators (`filetype:mkv OR …`,

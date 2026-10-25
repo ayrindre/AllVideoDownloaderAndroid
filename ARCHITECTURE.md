@@ -113,6 +113,9 @@ web/
 * **Layered glass recipe**: translucent gradient fill + `backdrop-filter: blur(22px) saturate(1.4)` + hairline `--panel-border` + inset highlight (`inset 0 1px 0 rgba(255,255,255,.05)`). Cards add a cursor-following `radial-gradient` (`--mx`) spotlight. All of it is compositor-only (opacity/transform/blur) so animations stay GPU-driven.
 * **Motion system**: enter keyframes (`view-in`, `card-in` staggered via `--i`, `toast-in` spring), sliding nav indicator (`transform: translateY(var(--nav-y))` on one pseudo-element), shimmer skeletons (`::after` translate loop), animated stripe + sheen on progress. `body.preload` disables transitions until first paint; `prefers-reduced-motion` kills everything.
 * **State**: one `Store` (settings, meta, results, jobs Map) + tiny pub/sub. Views subscribe to `job.update`/`jobs.hydrated`/`settings.changed`; nothing polls from the UI unless the WS is down.
+* **View routing**: `.view.active` is the single display switch — sections never stack. The
+  search hero has two states (`compact` = sticky command bar docked above results) driven by one
+  class; URL-shaped queries are redirected to the Direct module before hitting the engines.
 * **Templates over string HTML**: `<template id="tpl-result-card">` cloned + hydrated — fast, XSS-safe by default (`textContent` everywhere user data lands).
 
 ## 6. Extending

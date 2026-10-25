@@ -133,11 +133,9 @@
     const views = $$(".view");
     const current = views.find((v) => v.classList.contains("active"));
     if (current?.id === viewId) return;
-    if (current) {
-      current.style.animation = "none";
-      current.classList.remove("active");
-    }
+    if (current) current.classList.remove("active");
     const next = document.getElementById(viewId);
+    next.style.animation = "";          // re-arm the view-in transition every visit
     next.classList.add("active");
     $$(".nav-item").forEach((n) => n.classList.toggle("active", n.dataset.view === viewId));
     const active = document.querySelector(".nav-item.active");

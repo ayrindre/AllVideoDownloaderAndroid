@@ -1,20 +1,25 @@
 # -*- mode: python ; coding: utf-8 -*-
 """PyInstaller build spec for WebFinder (Windows).
 
-    pyinstaller build/webfinder.spec
+    python -m PyInstaller build/webfinder.spec --noconfirm
 
-Produces `dist/WebFinder.exe` — a single-file, windowless app that starts the
-FastAPI backend in-process and opens a frameless pywebview (WebView2) window.
+Produces `dist/WebFinder.exe` — single file, no console, frameless pywebview
+window. All paths resolve from SPECPATH so the build works from any cwd
+(`build.bat` does exactly this).
 """
 import os
 
-block_cipher = None
+ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))          # noqa: F821
+web_dir = os.path.join(ROOT, "web")
+icon = os.path.join(SPECPATH, "icon.ico")
+if not os.path.exists(web_dir):
+    raise SystemExit(f"[spec] frontend folder missing: {web_dir}")
 
 a = Analysis(
-    ["../run.py"],
-    pathex=[os.path.abspath(".")],
+    [os.path.join(ROOT, "run.py")],
+    pathex=[ROOT],
     binaries=[],
-    datas=[("../web", "web")],                    # frontend is bundled read-only
+    datas=[(web_dir, "web")],                 # frontend bundled read-only
     hiddenimports=[
         "webfinder", "webfinder.app", "webfinder.api", "webfinder.core",
         "webfinder.core.downloader", "webfinder.core.media", "webfinder.core.dorks",
@@ -26,11 +31,10 @@ a = Analysis(
     ],
     hookspath=[],
     runtime_hooks=[],
-    excludes=["tkinter", "PyQt5", "PySide6", "matplotlib", "test"],
-    cipher=block_cipher,
+    excludes=["tkinter", "PyQt5", "PySide6", "matplotlib", "test", "pytest"],
     noarchive=False,
 )
-pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+pyz = PYZ(a.pure)
 
 exe = EXE(
     pyz,
@@ -46,6 +50,6 @@ exe = EXE(
     upx_exclude=["ffmpeg.dll"],
     runtime_tmpdir=None,
     console=False,                       # no black console window
-    icon="icon.ico",
+    icon=icon if os.path.exists(icon) else None,
     disable_windowed_traceback=False,
 )

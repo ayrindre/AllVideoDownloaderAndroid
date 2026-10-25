@@ -1,6 +1,6 @@
 /* WebFinder · views/search.js — hero search, dork chips, multi-engine fan-out, results grid */
 (function () {
-  const { $, $$, el, toast, fmtBytes, faviconUrl, debounce, modal } = window.UI;
+  const { $, $$, el, toast, fmtBytes, faviconUrl, debounce } = window.UI;
   const S = window.Store;
 
   const state = { loading: false, filter: "all", lastData: null };
@@ -11,6 +11,7 @@
     $("#sb-go .sb-go-icon").innerHTML = ICONS.svg("arrowRight");
     $("#q-clear").innerHTML = ICONS.svg("x");
     $("#back-hero").innerHTML = ICONS.svg("chevronL");
+    $("#back-hero").title = "Edit query (expand the command bar)";
     $("#re-run").innerHTML = ICONS.svg("refresh");
 
     renderTypeChips();
@@ -25,6 +26,10 @@
     S.on("settings.changed", (st) => { resolve.checked = !!st.resolve_pages; });
   }
 
+  const maybeRerun = debounce(() => {
+    if (S.lastQuery && !state.loading && !$("#results-wrap").classList.contains("hidden")) run();
+  }, 420);
+
   function renderTypeChips() {
     const wrap = $("#type-chips");
     wrap.innerHTML = "";
@@ -36,6 +41,7 @@
         chip.classList.toggle("on", input.checked);
         input.checked ? S.selectedTypes.add(key) : S.selectedTypes.delete(key);
         previewQuery();
+        maybeRerun();
       });
       wrap.append(chip);
     }
@@ -53,6 +59,7 @@
       pill.addEventListener("click", () => {
         if (S.selectedEngines.has(key)) { S.selectedEngines.delete(key); pill.classList.remove("on"); }
         else { S.selectedEngines.add(key); pill.classList.add("on"); }
+        maybeRerun();
       });
       wrap.append(pill);
     }
@@ -99,7 +106,7 @@
     });
     addEventListener("keydown", (e) => {
       if (e.key === "/" && document.activeElement !== input && !e.ctrlKey && !e.metaKey) { e.preventDefault(); input.focus(); }
-      if (e.key === "Escape" && !$("#results-wrap").classList.contains("hidden") && state.loading) backToHero();
+      if (e.key === "Escape" && $("#search-hero").classList.contains("compact")) backToHero();
     });
     paintSeg();
   }
@@ -113,10 +120,17 @@
   }
 
   function backToHero() {
-    $("#results-wrap").classList.add("hidden");
-    $("#search-hero").classList.remove("hidden");
-    $("#search-hero").style.opacity = "";
-    setTimeout(() => $("#q").focus(), 60);
+    const hero = $("#search-hero");
+    hero.classList.remove("compact");
+    $("#viewport").scrollTo({ top: 0, behavior: "smooth" });
+    setTimeout(() => $("#q").focus(), 120);
+  }
+
+  /* A bare URL typed into search is almost never a search — hand it to the
+     Smart Direct Link module, which actually knows how to resolve it. */
+  function looksLikeUrl(q) {
+    if (/^(https?|ftp|magnet|ed2k):\/\//i.test(q)) return true;
+    return !/\s/.test(q) && /^(www\.)?[\w-]+(\.[\w-]+)+([/:?#].*)?$/.test(q) && /\.[a-z]{2,}([/:?#]|$)/i.test(q);
   }
 
   /* ── search run ---------------------------------------------------------- */
@@ -124,10 +138,16 @@
     const q = $("#q").value.trim();
     if (!q) { $("#q").focus(); shake($("#q").closest(".search-bar")); return; }
     if (state.loading) return;
+    if (looksLikeUrl(q)) {
+      S.emit("nav", "view-direct");
+      $("#direct-url").value = q;
+      window.DirectView.analyze();
+      toast("That's a link, not a query — analyzed it in Smart Direct Link instead.", "info");
+      return;
+    }
     state.loading = true;
     S.lastQuery = q;
-    $("#search-hero").classList.add("lifting");
-    setTimeout(() => $("#search-hero").classList.add("hidden"), 240);
+    $("#search-hero").classList.add("compact");
     const wrap = $("#results-wrap");
     wrap.classList.remove("hidden");
     $("#rh-title").textContent = q;
@@ -140,6 +160,7 @@
       S.results = data.results || [];
       renderEngineStrip(data);
       renderResults();
+      requestAnimationFrame(() => $("#results-wrap").scrollIntoView({ behavior: "smooth", block: "start" }));
     } catch (err) {
       $("#results-grid").innerHTML = "";
       showEmpty("search-x", "Search failed", `${err.message}. Check the engine mix in Settings — some engines wall off datacenter IPs; try Bing + DuckDuckGo, or flip on Demo mode to preview the UI offline.`);
