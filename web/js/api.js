@@ -21,7 +21,7 @@
     meta: () => req("GET", "/api/meta"),
     getSettings: () => req("GET", "/api/settings"),
     saveSettings: (patch) => req("PUT", "/api/settings", { patch }),
-    search: (query, types, engines) => req("POST", "/api/search", { query, types, engines }),
+    search: (query, types, engines, filters) => req("POST", "/api/search", { query, types, engines, filters }),
     analyze: (url) => req("POST", "/api/analyze", { url }),
     analyzeDownload: (url, title, format) => req("POST", "/api/analyze/download", { url, title, format }),
     startDownload: (payload) => req("POST", "/api/downloads", payload),

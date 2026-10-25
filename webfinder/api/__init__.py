@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from ..config import APP_NAME, APP_VERSION, CONFIG_FILE, settings
 from ..core import dorks as dk
 from ..core import media
+from ..core import verticals
 from ..core.downloader import manager
 from ..core.ffmpeg_tools import find_ffmpeg
 from ..engines import ENGINE_META, run_search
@@ -32,6 +33,7 @@ class SearchRequest(BaseModel):
     types: list[str] = Field(default_factory=list)
     engines: Optional[list[str]] = None
     limit: Optional[int] = None
+    filters: dict = Field(default_factory=dict)   # {"images": {...}, "videos": {...}}
 
 
 class DownloadRequest(BaseModel):
@@ -117,7 +119,8 @@ async def open_path(path: str = ""):
 # ---------------------------------------------------------------------------
 def _normalize(url: str) -> str:
     p = urlparse(url)
-    return f"{p.netloc.lower().lstrip('www.')}{p.path.rstrip('/')}{'' if not p.query else '?' + p.query[:80]}".lower()
+    host = p.netloc.lower().removeprefix("www.")
+    return f"{host}{p.path.rstrip('/')}{'' if not p.query else '?' + p.query[:80]}".lower()
 
 
 @router.post("/search")
@@ -126,13 +129,38 @@ async def search(body: SearchRequest):
     engines = body.engines or [e for e, on in cfg["engines"].items() if on]
     engines = [e for e in engines if e in ENGINE_META] or ["bing"]
     limit = min(int(body.limit or cfg["result_limit"]), 200)
+    safe = bool(cfg.get("safe_search"))
     t0 = time.time()
+    data: dict | None = None
 
     if cfg["demo_mode"]:
-        data = media.build_search_results(body.query, body.types, engines, limit)
-    else:
+        if body.types == ["image"]:
+            data = media.demo_image_results(body.query, limit)
+        elif body.types == ["video"]:
+            data = media.demo_video_results(body.query, limit)
+        else:
+            data = media.build_search_results(body.query, body.types, engines, limit)
+
+    # ── vertical mode: ONE media type selected → query the engines' media indexes
+    elif cfg.get("vertical_mode") and len(body.types) == 1 and body.types[0] in ("image", "video"):
+        kind = body.types[0]
+        vf = (body.filters or {}).get("images" if kind == "image" else "videos") or {}
+        fn = verticals.search_images if kind == "image" else verticals.search_videos
+        vdata = await fn(body.query, vf, limit, safe)
+        if vdata["results"]:
+            data = {
+                "query": body.query, "raw_query": body.query, "types": body.types,
+                "mode": "images" if kind == "image" else "videos",
+                "elapsed_ms": int((time.time() - t0) * 1000),
+                "filters": vf,
+                "engines": [{"engine": k, "ok": v["ok"], "error": v["error"], "count": v["count"]}
+                            for k, v in vdata["sources"].items()],
+                "results": vdata["results"],
+            }
+
+    if data is None:
         responses = await run_search(body.query, body.types, engines, limit,
-                                     proxy=cfg.get("proxy"))
+                                     proxy=cfg.get("proxy"), safe=safe)
         results, seen = [], set()
         # Round-robin across engines so every source is represented fairly.
         buckets = {r.engine: list(r.results) for r in responses if r.ok}
@@ -162,13 +190,18 @@ async def search(body: SearchRequest):
         }
 
     # Optional enhancement: crawl the top ambiguous pages for hidden direct links.
-    if cfg.get("resolve_pages") and not cfg["demo_mode"]:
+    if data.get("mode") not in ("images", "videos") and cfg.get("resolve_pages") and not cfg["demo_mode"]:
         targets = [r for r in data["results"] if r.get("file_type") == "link"][:5]
         scans = await asyncio.gather(*(media.scan_page(r["url"]) for r in targets),
                                      return_exceptions=True)
         for r, scan in zip(targets, scans):
             if isinstance(scan, list) and scan:
                 r["media_candidates"] = scan[:6]
+    for r in data.get("results", []):
+        r.setdefault("snippet", r.get("publisher") or "")
+        r.setdefault("size_bytes", None)
+        r.setdefault("thumb", "")
+        r.setdefault("domain", urlparse(r.get("page") or r.get("url", "")).netloc.removeprefix("www."))
     data["raw_query"] = body.query
     data["types"] = body.types
     return data

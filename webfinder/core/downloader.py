@@ -314,22 +314,29 @@ class DownloadManager:
                     job.set_progress(job.total, job.total, None)
                 self.publish(job)
 
-        opts: dict[str, Any] = {
+        from .media import base_yt_opts
+        core: dict[str, Any] = {
             "progress_hooks": [hook],
             "quiet": True, "no_warnings": True, "noprogress": True,
             "outtmpl": str(Path(str(job.filepath)).parent / "%(title).150B.%(ext)s"),
             "format": job.meta.get("format") or "bv*+ba/b",
             "merge_output_format": settings.get("default_container", "mp4"),
             "concurrent_fragment_downloads": 4,
-            "socket_timeout": 30, "retries": 3, "nocheckcertificate": True,
         }
-        try:
-            with yt_dlp.YoutubeDL(opts) as ydl:
-                ydl.download([job.url])
-        except yt_dlp.utils.DownloadCancelled:
-            raise asyncio.CancelledError() from None
-        except Exception as exc:  # noqa: BLE001
-            raise RuntimeError(f"yt-dlp failed: {exc}") from exc
+        # default attempt, then a mobile-player retry (beats many YouTube bot walls)
+        attempts = [base_yt_opts(core),
+                    base_yt_opts({**core, "extractor_args": {"youtube": {"player_client": ["android", "tv"]}}})]
+        last_err: Exception | None = None
+        for opts in attempts:
+            try:
+                with yt_dlp.YoutubeDL(opts) as ydl:
+                    ydl.download([job.url])
+                return
+            except yt_dlp.utils.DownloadCancelled:
+                raise asyncio.CancelledError() from None
+            except Exception as exc:  # noqa: BLE001
+                last_err = exc
+        raise RuntimeError(f"yt-dlp failed: {last_err}")
 
     # ------------------------------------------------------------------
     # Worker: simulated transfer (demo mode / offline & blocked networks)

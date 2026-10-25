@@ -79,6 +79,7 @@
   }
 
   function render(d) {
+    if (d.kind === "media_error") return renderMediaError(d);
     if (d.kind === "media") return renderMedia(d);
     if (d.kind === "hls") return renderHls(d);
     if (d.kind === "direct") return renderDirect(d);
@@ -191,6 +192,23 @@
       el("a", { class: "btn btn-ghost", href: d.url, target: "_blank", rel: "noopener" },
         el("span", { class: "btn-ico", html: ICONS.svg("external") }), el("span", {}, "Open"))));
     card.append(body);
+  }
+
+  function renderMediaError(d) {
+    const card = cardShell(`MEDIA · ${d.extractor} — BLOCKED`, "#fb7185");
+    card.append(el("h2", { class: "ac-title", style: { marginBottom: 6 } }, "The site is recognized, but extraction was refused"));
+    card.append(el("div", { class: "notice err", style: { margin: "10px 0" },
+      html: `${ICONS.svg("warning")}<div><b>${escapeHtml(d.extractor)} extractor reported:</b><br>${escapeHtml(d.error)}</div>` }));
+    for (const hint of d.hints || []) {
+      card.append(el("div", { class: "notice info", style: { marginBottom: 8 }, html: `${ICONS.svg("info")}<div>${hint}</div>` }));
+    }
+    card.append(el("div", { class: "ac-actions" },
+      el("button", { class: "btn btn-primary", onclick: () => { S.emit("nav", "view-settings"); toast("Settings → Media & conversion → Browser cookies source.", "info"); } },
+        el("span", { class: "btn-ico", html: ICONS.svg("settings") }), el("span", {}, "Open Settings (cookies)")),
+      el("button", { class: "btn btn-ghost", onclick: analyze },
+        el("span", { class: "btn-ico", html: ICONS.svg("refresh") }), el("span", {}, "Retry")),
+      el("button", { class: "btn btn-ghost", onclick: () => { window.UI.copyText(d.url); toast("URL copied — it works in yt-dlp CLI / IDM too.", "ok", { icon: "copy" }); } },
+        el("span", { class: "btn-ico", html: ICONS.svg("copy") }), el("span", {}, "Copy URL"))));
   }
 
   function renderMagnet(d) {

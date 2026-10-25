@@ -31,13 +31,15 @@ DEFAULTS: dict[str, Any] = {
         "mojeek": True,
     },
     "result_limit": 60,
-    "safe_search": False,
+    "safe_search": False,                # OFF by default — the user sees everything
+    "vertical_mode": True,               # image/video chips use true media verticals
     "proxy": "",                         # optional http/socks proxy for scraping
     "resolve_pages": True,               # crawl result pages for direct file links
     # --- media -----------------------------------------------------------
     "default_container": "mp4",
     "default_quality": "1080",           # "best" | 2160 | 1440 | 1080 | 720 | 480
     "ffmpeg_path": "",                   # manual override if not on PATH
+    "ytdlp_browser_cookies": "",         # ""|chrome|edge|firefox|brave|chromium — defeats paywall/bot walls
     # --- appearance / misc ------------------------------------------------
     "accent": "violet",                  # violet | azure | magenta | mint
     "ambient_effects": True,

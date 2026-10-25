@@ -61,6 +61,23 @@ Module map and API reference: **[ARCHITECTURE.md](ARCHITECTURE.md)**
 
 ## 3. How the smart logic works
 
+### True media verticals (images & videos)
+Selecting a single **Image** or **Video** chip switches from web search to the engines'
+*media indexes*, so you get the files themselves — not pages about them:
+
+| | Sources | Direct fields | Filters |
+|---|---|---|---|
+| **Images** | DuckDuckGo `i.js` JSON · Bing Images · Google `tbm=isch` | full-res URL (IDM-ready), thumb, w×h, source page | size ≥800/HD/4K · aspect · color · kind (photo/clipart/line/GIF/B&W) |
+| **Videos** | DuckDuckGo `v.js` JSON · Bing Videos · dorked web as third source | playable media URL, thumb, duration, publisher | length (<4m / 4–20m / >20m) · min height |
+
+Filters live in the **⚙ Filters** popover next to the engine pills (color/kind ride Bing's
+index, size & aspect are also enforced locally); **SafeSearch is OFF by default** with a
+one-click pill next to it, and every source fails independently — a blocked engine shows
+as `blocked` in the source strip instead of killing the search. Google scraping ships with
+the `CONSENT`/`SOCS` cookies + `gbv=1` that make it actually parseable (`Google 0 hits` was
+the consent wall), and DuckDuckGo falls back to its `lite` markup bucket when the main HTML
+endpoint comes back empty.
+
 ### Interaction model
 Typing a **bare URL into the main search box routes it straight into the Smart Direct
 Link analyzer** (that's what it is — not a search query). Once a search runs, the hero
@@ -91,6 +108,12 @@ direct file links* — those get their own **Copy link / Download** buttons on t
    `bestvideo[height<=1080]+bestaudio/best[height<=1080]` string streams through yt-dlp's API
    with `progress_hooks` feeding the same live UI pipeline as every other job.
 4. **Magnet** → copied/opened with your torrent client (never faked as a direct file).
+5. **Extraction refused** (YouTube's "Sign in to confirm you're not a bot", age/region
+   gates) → the analyzer now says so: a red card quoting yt-dlp's own error, with the two
+   fixes it actually has — **Settings → Media → Browser cookies source** (reads your
+   Chrome/Edge/Firefox session locally, so logged-in + gated videos work) and
+   `pip install -U yt-dlp`. Failed web clients are auto-retried against yt-dlp's mobile
+   players for both analysis and downloads.
 
 Every job exposes **Pause · Resume · Retry · Cancel · Copy source URL · Open in folder**, plus a
 one-click **Copy Download Link** on every result card — paste-ready for IDM/NDM/aria2.

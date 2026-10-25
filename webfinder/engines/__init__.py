@@ -101,10 +101,11 @@ _DIRECT_EXT_ALL = DIRECT_EXT_UNION
 # ---------------------------------------------------------------------------
 # Engine implementations
 # ---------------------------------------------------------------------------
-async def search_duckduckgo(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+async def search_duckduckgo(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
     resp = await client.post(
         "https://html.duckduckgo.com/html/",
-        data={"q": query, "kl": "us-en", "ia": "web"},
+        data={"q": query, "kl": "us-en", "ia": "web", "safesearch": "strict" if safe else "off",
+              "kp": 1 if safe else -2},
         headers={"Referer": "https://duckduckgo.com/"},
     )
     resp.raise_for_status()
@@ -121,16 +122,36 @@ async def search_duckduckgo(client: httpx.AsyncClient, query: str, limit: int) -
         out.append(_mk_result(url, _clean(m.group(2)), snippet))
         if len(out) >= limit:
             break
+    if not out:
+        out = await _ddg_lite(client, query, limit, safe)
     return out
 
 
-async def search_bing(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+async def _ddg_lite(client: httpx.AsyncClient, query: str, limit: int, safe: bool) -> list[dict]:
+    """lite.duckduckgo.com — plainer markup, different anti-bot bucket."""
+    try:
+        resp = await client.get("https://lite.duckduckgo.com/lite/",
+                                params={"q": query, "kl": "us-en"})
+    except httpx.HTTPError:
+        return []
+    out: list[dict] = []
+    for m in re.finditer(r"<a[^>]*class=['\"]result-link['\"][^>]*href=['\"]([^'\"]+)['\"][^>]*>(.*?)</a>", resp.text, re.S):
+        url = _strip_redirect(unescape(m.group(1)))
+        if not url.startswith("http"):
+            continue
+        out.append(_mk_result(url, _clean(m.group(2)), ""))
+        if len(out) >= limit:
+            break
+    return out
+
+
+async def search_bing(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
     # Bing's RSS endpoint is dramatically more scraper-friendly than its HTML.
     out: list[dict] = []
-    resp = await client.get(
-        "https://www.bing.com/search",
-        params={"q": query, "count": min(limit, 50), "setlang": "en", "format": "rss"},
-    )
+    params = {"q": query, "count": min(max(limit, 30), 100), "setlang": "en", "format": "rss"}
+    if not safe:
+        params["adlt"] = "off"
+    resp = await client.get("https://www.bing.com/search", params=params)
     resp.raise_for_status()
     for m in re.finditer(r"<item>\s*<title>(.*?)</title>\s*<link>(.*?)</link>\s*<description>(.*?)</description>", resp.text, re.S):
         url = unescape(m.group(2))
@@ -140,7 +161,10 @@ async def search_bing(client: httpx.AsyncClient, query: str, limit: int) -> list
     if out:
         return out
     # RSS can be disabled — fall back to HTML scraping.
-    resp = await client.get("https://www.bing.com/search", params={"q": query, "count": min(limit, 30), "setlang": "en"})
+    html_params = {"q": query, "count": min(limit, 30), "setlang": "en"}
+    if not safe:
+        html_params["adlt"] = "off"
+    resp = await client.get("https://www.bing.com/search", params=html_params)
     for m in re.finditer(r'<li class="b_algo".*?<h2><a href="([^"]+)"[^>]*>(.*?)</a>.*?(?:<p[^>]*>(.*?)</p>)?', resp.text, re.S):
         url = _strip_redirect(unescape(m.group(1)))
         if not url.startswith("http"):
@@ -151,10 +175,14 @@ async def search_bing(client: httpx.AsyncClient, query: str, limit: int) -> list
     return out
 
 
-async def search_google(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+async def search_google(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
+    # Without these cookies Google serves the EU consent interstitial — the #1
+    # reason "Google 0 hits" happens. gbv=1 forces the classic parseable layout.
+    client.cookies.update({"CONSENT": "YES+cb.20220419-08-p0.en.LX.ALL", "SOCS": "CAI"})
     resp = await client.get(
         "https://www.google.com/search",
-        params={"q": query, "num": min(limit, 30), "hl": "en", "gl": "us"},
+        params={"q": query, "num": min(max(limit, 30), 100), "hl": "en", "gl": "us",
+                "gbv": 1, "safe": "active" if safe else "off"},
     )
     resp.raise_for_status()
     out: list[dict] = []
@@ -174,7 +202,7 @@ async def search_google(client: httpx.AsyncClient, query: str, limit: int) -> li
     return out
 
 
-async def search_yandex(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+async def search_yandex(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
     resp = await client.get(
         "https://yandex.com/search/", params={"text": query, "lr": 21204},
         headers={"Referer": "https://yandex.com/"},
@@ -193,15 +221,21 @@ async def search_yandex(client: httpx.AsyncClient, query: str, limit: int) -> li
     return out
 
 
-async def search_mojeek(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+async def search_mojeek(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
     resp = await client.get("https://www.mojeek.com/search", params={"q": query})
     resp.raise_for_status()
     out: list[dict] = []
-    for m in re.finditer(r'<a class="ob"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?(?:<p>(.*?)</p>)?', resp.text, re.S):
+    patterns = (
+        r'<a class="ob"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?(?:<p>(.*?)</p>)?',   # 2023 layout
+        r'<h2 class="title[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>\s*</h2>',  # current layout
+    )
+    rx = next((re.compile(p, re.S) for p in patterns if re.search(p, resp.text)), re.compile(patterns[0], re.S))
+    for m in rx.finditer(resp.text):
         url = _strip_redirect(unescape(m.group(1)))
         if not url.startswith("http"):
             continue
-        out.append(_mk_result(url, _clean(m.group(2)), _clean(m.group(3) or "")))
+        snippet = _clean(m.group(3)) if m.re.groups >= 3 and m.lastindex and m.lastindex >= 3 else ""
+        out.append(_mk_result(url, _clean(m.group(2)), snippet))
         if len(out) >= limit:
             break
     return out
@@ -230,6 +264,7 @@ async def run_search(
     engine_names: list[str],
     limit: int,
     proxy: str | None = None,
+    safe: bool = False,
 ) -> list[EngineResponse]:
     """Fan-out the same dork-augmented query to every enabled engine."""
     full_query = dk.build_query(query, types)
@@ -239,7 +274,7 @@ async def run_search(
         t0 = loop.time()
         name = fn.__name__.replace("search_", "")
         try:
-            res = await fn(client, full_query, limit)
+            res = await fn(client, full_query, limit, safe)
             return EngineResponse(name, True, "", int((loop.time() - t0) * 1000), res)
         except Exception as exc:  # noqa: BLE001
             return EngineResponse(name, False, str(exc)[:200], int((loop.time() - t0) * 1000), [])

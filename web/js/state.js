@@ -8,6 +8,7 @@
     results: [],              // last search results
     selectedTypes: new Set(),
     selectedEngines: new Set(),
+    searchFilters: { images: {}, videos: {} },
     lastQuery: "",
 
     on(evt, fn) {

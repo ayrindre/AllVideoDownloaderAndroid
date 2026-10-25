@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from functools import lru_cache
 from urllib.parse import urlparse, urljoin, unquote
 
 import httpx
@@ -27,6 +28,43 @@ from . import dorks as dk
 from .ffmpeg_tools import find_ffmpeg, probe
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36 WebFinder/1.0"
+
+
+def base_yt_opts(extra: dict | None = None) -> dict:
+    """Common yt-dlp options incl. optional browser cookie import.
+
+    Reading cookies from the user's browser (Settings → YouTube cookies source)
+    is the single most effective fix for "Sign in to confirm you're not a bot"
+    and age/region-gated videos.
+    """
+    opts = {"quiet": True, "no_warnings": True, "noprogress": True,
+            "socket_timeout": 30, "retries": 3, "nocheckcertificate": True}
+    browser = (settings.get("ytdlp_browser_cookies") or "").strip()
+    if browser:
+        opts["cookiesfrombrowser"] = (browser,)
+    if extra:
+        opts.update(extra)
+    return opts
+
+
+@lru_cache(maxsize=None)
+def _ie_for(url: str) -> str:  # cached: the registry walk is ~1800 checks the first time
+    try:
+        from yt_dlp.extractor import gen_extractors
+        for ie in gen_extractors():
+            try:
+                if ie.suitable(url) and ie.IE_NAME not in ("generic", "Generic"):
+                    return ie.IE_NAME
+            except Exception:  # noqa: BLE001 — some matchers choke on junk urls
+                continue
+    except Exception:  # noqa: BLE001 — no yt-dlp installed
+        pass
+    return ""
+
+
+def find_extractor(url: str) -> str:
+    """Name of the yt-dlp extractor registered for this URL ('' = none)."""
+    return _ie_for(url)
 MEDIA_HREF_RE = re.compile(
     r"""href=["']([^"']+?\.(?:mp4|mkv|webm|m4v|avi|mov|mp3|flac|m4a|zip|rar|7z|gz|tar|exe|msi|iso|pdf|epub|torrent|m3u8|mpd))["']""",
     re.I)
@@ -55,9 +93,22 @@ async def analyze(url: str) -> dict:
                 "bit_rate": info.get("bit_rate", 0)}
 
     # 1) Try the yt-dlp extractor registry — this covers YouTube & friends.
-    media = await _try_ytdlp(url)
+    media, yt_err = await _try_ytdlp(url)
     if media:
         return media
+    # 1b) A registered extractor exists but extraction failed (bot check, age
+    #     gate, geo block, outdated yt-dlp). Say exactly that — never bury it
+    #     in a misleading "regular web page" verdict.
+    ie = await asyncio.to_thread(find_extractor, url)
+    if ie:
+        hints = []
+        if not settings.get("ytdlp_browser_cookies"):
+            hints.append("Set Settings → Media → <b>Browser cookies source</b> to <code>chrome</code>/<code>edge</code> so yt-dlp can use your logged-in session.")
+        hints.append("Update yt-dlp regularly: <code>pip install -U yt-dlp</code> — sites change extractors weekly.")
+        return {"kind": "media_error", "url": url, "extractor": ie, "file_type": "video",
+                "title": dk.guess_filename(url, ie),
+                "error": (yt_err or "yt-dlp returned no info")[:400],
+                "hints": hints}
 
     # 2) Probe the URL itself (HEAD → fallback GET) and look at what comes back.
     async with httpx.AsyncClient(follow_redirects=True, timeout=15.0,
@@ -112,24 +163,32 @@ def _magnet_title(url: str) -> str:
 _QUALITY_ORDER = (4320, 2880, 2160, 1440, 1080, 720, 480, 360, 240, 144)
 
 
-def _ytdlp_extract(url: str) -> dict | None:
+def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
+    """Extract media info. Returns (info, error) — error is surfaced to the UI."""
     try:
         import yt_dlp
     except ImportError:
-        return None
-    opts = {"quiet": True, "no_warnings": True, "skip_download": True,
-            "extract_flat": False, "playlist_items": "1", "noplaylist": True,
-            "socket_timeout": 12, "nocheckcertificate": True}
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-    except Exception:  # noqa: BLE001 — "no extractor" is the normal case here
-        return None
-    if not info or info.get("_type") == "playlist":
-        entries = (info or {}).get("entries") or []
+        return None, "yt-dlp is not installed in the backend venv."
+    base = {"skip_download": True, "extract_flat": False,
+            "playlist_items": "1", "noplaylist": True, "socket_timeout": 15}
+    errors: list[str] = []
+    info = None
+    # Two attempts: default client, then YouTube's mobile client (defeats many web walls).
+    for extra in ({}, {"extractor_args": {"youtube": {"player_client": ["android", "tv"]}}}):
+        try:
+            with yt_dlp.YoutubeDL(base_yt_opts({**base, **extra})) as ydl:
+                info = ydl.extract_info(url, download=False)
+            break
+        except Exception as exc:  # noqa: BLE001 — "no extractor" is the normal case
+            errors.append(str(exc).replace("\n", " ")[:220])
+            info = None
+    if not info:
+        return None, " · ".join(dict.fromkeys(errors))
+    if info.get("_type") == "playlist":
+        entries = info.get("entries") or []
         info = entries[0] if entries else None
     if not info:
-        return None
+        return None, "Extractor returned a playlist with no playable entry."
 
     formats: dict[int, dict] = {}
     for f in info.get("formats", []):
@@ -189,7 +248,7 @@ def _ytdlp_extract(url: str) -> dict | None:
     }
 
 
-async def _try_ytdlp(url: str) -> dict | None:
+async def _try_ytdlp(url: str) -> tuple[dict | None, str]:
     return await asyncio.to_thread(_ytdlp_extract, url)
 
 
@@ -241,9 +300,11 @@ async def plan_download(url: str, title: str = "", fmt: dict | None = None) -> d
     if url.lower().startswith("magnet:"):
         return {"url": url, "kind": "magnet", "title": _magnet_title(url),
                 "file_type": "magnet", "meta": {}}
-    media = await _try_ytdlp(url) if not ext else None
+    media = None
+    if not ext or await asyncio.to_thread(find_extractor, url):
+        media, _err = await _try_ytdlp(url)
     if media:
-        quality = str(settings.get("default_quality", "1080"))
+        quality = str(settings.get("default_quality", "1080"))  # noqa: E501
         chosen = None
         for f in media["formats"]:
             if quality == "best" or str(f["height"]) == quality:
@@ -296,6 +357,52 @@ def _demo_payload(url: str) -> dict:
             "title": dk.guess_filename(url), "filename": dk.guess_filename(url),
             "file_type": dk.classify(url), "content_type": "application/octet-stream",
             "size": 734_000_000, "accepts_ranges": True}
+
+
+def demo_image_results(query: str, limit: int) -> dict:
+    import hashlib
+    sizes = [(1920, 1080), (2560, 1440), (1200, 1600), (800, 800), (3840, 2160), (1600, 900)]
+    results = []
+    for i in range(min(limit, 18)):
+        w, h = sizes[i % len(sizes)]
+        seed = hashlib.md5(f"{query}{i}".encode()).hexdigest()[:8]
+        results.append({
+            "title": f"{query.title()} — demo photo #{i + 1}",
+            "url": f"https://picsum.photos/seed/{seed}/{w}/{h}",
+            "thumb": f"https://picsum.photos/seed/{seed}/480/320",
+            "page": f"https://demo.photos/p/{seed}",
+            "domain": "demo.photos", "engine": ["bing", "duckduckgo", "google"][i % 3],
+            "snippet": "", "size_bytes": None, "file_type": "image", "is_direct": True,
+            "width": w, "height": h, "duration": None, "demo": True,
+        })
+    return {"query": query, "raw_query": query, "types": ["image"], "mode": "images",
+            "elapsed_ms": 280, "demo": True,
+            "engines": [{"engine": e, "ok": True, "error": "", "count": 6}
+                        for e in ("bing", "duckduckgo", "google")],
+            "results": results}
+
+
+def demo_video_results(query: str, limit: int) -> dict:
+    import hashlib
+    sample = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4"
+    results = []
+    for i in range(min(limit, 12)):
+        seed = hashlib.md5(f"{query}v{i}".encode()).hexdigest()[:8]
+        results.append({
+            "title": f"{query.title()} — demo clip {i + 1}",
+            "url": sample if i % 3 else f"https://demo.video/{seed}.mp4",
+            "thumb": f"https://picsum.photos/seed/{seed}/480/270",
+            "page": f"https://demo.video/watch/{seed}",
+            "domain": "demo.video", "engine": ["duckduckgo", "bing", "web_dorks"][i % 3],
+            "snippet": "", "size_bytes": None, "file_type": "video", "is_direct": True,
+            "width": 0, "height": (720, 1080, 480)[i % 3],
+            "duration": [95, 244, 1210, 58][i % 4], "publisher": "DemoTube", "demo": True,
+        })
+    return {"query": query, "raw_query": query, "types": ["video"], "mode": "videos",
+            "elapsed_ms": 320, "demo": True,
+            "engines": [{"engine": e, "ok": True, "error": "", "count": 4}
+                        for e in ("duckduckgo", "bing", "web_dorks")],
+            "results": results}
 
 
 def build_search_results(query: str, types: list[str], engines: list[str], limit: int) -> dict:

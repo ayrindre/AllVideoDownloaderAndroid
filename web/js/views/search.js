@@ -1,6 +1,6 @@
 /* WebFinder · views/search.js — hero search, dork chips, multi-engine fan-out, results grid */
 (function () {
-  const { $, $$, el, toast, fmtBytes, faviconUrl, debounce } = window.UI;
+  const { $, $$, el, toast, fmtBytes, fmtDuration, faviconUrl, debounce } = window.UI;
   const S = window.Store;
 
   const state = { loading: false, filter: "all", lastData: null };
@@ -17,6 +17,8 @@
     renderTypeChips();
     renderEngines();
     wireForm();
+    wireSafePill();
+    wireFiltersPop();
     const resolve = $("#opt-resolve");
     resolve.checked = !!S.settings.resolve_pages;
     resolve.addEventListener("change", () => {
@@ -155,7 +157,7 @@
     $("#engine-strip").innerHTML = "";
     renderSkeletons();
     try {
-      const data = await window.API.search(q, [...S.selectedTypes], chosenEngines());
+      const data = await window.API.search(q, [...S.selectedTypes], chosenEngines(), S.searchFilters);
       state.lastData = data;
       S.results = data.results || [];
       renderEngineStrip(data);
@@ -174,18 +176,20 @@
       { transform: "translateX(-4px)" }, { transform: "translateX(0)" }], { duration: 280, easing: "ease-out" });
   }
 
+  const VERTICAL_LABELS = { web_dorks: "Video dorks" };
   function renderEngineStrip(data) {
     const strip = $("#engine-strip");
     strip.innerHTML = "";
     (data.engines || []).forEach((e, i) => {
       const meta = S.meta.engines[e.engine] || {};
-      strip.append(el("span", { class: `esrc${e.ok ? "" : " bad"}`, style: { "--i": i, "--eng-c": meta.color }, title: e.error || "" },
+      strip.append(el("span", { class: `esrc${e.ok ? "" : " bad"}`, style: { "--i": i, "--eng-c": meta.color }, title: e.error || "ok" },
         el("span", { class: "dot" }),
-        el("b", {}, meta.label || e.engine),
+        el("b", {}, meta.label || VERTICAL_LABELS[e.engine] || e.engine),
         e.ok ? `${e.count} hits` : "blocked"));
     });
     const n = (data.results || []).length;
-    $("#rh-meta").textContent = `${n} result${n === 1 ? "" : "s"} · ${data.elapsed_ms} ms${data.demo ? " · demo data" : ""}`;
+    const mode = data.mode === "images" ? "image index" : data.mode === "videos" ? "video index" : "web";
+    $("#rh-meta").textContent = `${n} result${n === 1 ? "" : "s"} · ${data.elapsed_ms} ms · ${mode}${data.demo ? " · demo data" : ""}`;
   }
 
   /* ── rendering ------------------------------------------------------------- */
@@ -212,8 +216,13 @@
   function renderResults() {
     const grid = $("#results-grid");
     grid.innerHTML = "";
-    let list = state.lastData?.results || [];
+    const data = state.lastData;
+    const vertical = data?.mode === "images" || data?.mode === "videos";
+    $("#result-filter").classList.toggle("hidden", vertical);
+    grid.classList.toggle("grid-media", !!vertical);
+    let list = data?.results || [];
     if (state.filter === "direct") list = list.filter((r) => r.is_direct);
+    if (vertical) { renderMediaGrid(list, data.mode); return; }
     if (!list.length) {
       showEmpty(state.filter === "direct" ? "scan" : "search-x",
         state.filter === "direct" ? "No direct files in this batch" : "Nothing came back",
@@ -254,6 +263,63 @@
       wireCard(card, r, letterFallback);
       grid.append(card);
     });
+  }
+
+  /* ── media grid (image & video verticals) ────────────────────────────── */
+  function renderMediaGrid(list, mode) {
+    const grid = $("#results-grid");
+    if (!list.length) {
+      showEmpty("search", "The media indexes came back empty", "Try another wording, more engines, or drop the active filters — verticals index billions of files but they are not every file on the web.");
+      return;
+    }
+    $("#results-empty").classList.add("hidden");
+    list.forEach((r, i) => grid.append(mediaCard(r, mode, i)));
+  }
+
+  function mediaCard(r, mode, i) {
+    const isVideo = mode === "videos";
+    const badge = isVideo
+      ? (r.duration ? fmtDurationLocal(r.duration) : (r.height ? `${r.height}p` : "clip"))
+      : (r.width && r.height ? `${r.width}×${r.height}` : "");
+    const img = el("img", { class: "mc-thumb", alt: "", loading: "lazy", src: r.thumb || r.url });
+    img.onerror = () => { img.remove(); };
+    const card = el("figure", { class: "mcard", tabindex: 0, style: { "--i": Math.min(i, 20) } },
+      img,
+      badge ? el("span", { class: "mc-badge" }, badge) : null,
+      el("div", { class: "mc-actions" },
+        el("button", { class: "fab", title: isVideo ? "Play source" : "Open full size", html: ICONS.svg(isVideo ? "play" : "external") }),
+        el("button", { class: "fab fab-copy", title: "Copy direct link" }, el("span", { html: ICONS.svg("copy") })),
+        el("button", { class: "fab fab-dl", title: "Download in WebFinder" }, el("span", { html: ICONS.svg("download") }))),
+      el("figcaption", {},
+        el("div", { class: "mc-title" }, r.title || ""),
+        el("div", { class: "mc-src" },
+          el("span", {}, r.domain || ""),
+          r.publisher ? el("span", { class: "mc-pub" }, r.publisher) : null,
+          el("span", { class: "mc-eng" }, r.engine || ""))));
+
+    card.querySelector(".mc-actions .fab:not(.fab-copy):not(.fab-dl)")
+      .addEventListener("click", () => window.open(r.page || r.url, "_blank", "noopener"));
+    card.querySelector(".fab-copy").addEventListener("click", async (e) => {
+      await window.UI.copyText(r.url);
+      e.currentTarget.classList.add("copied"); setTimeout(() => e.currentTarget.classList.remove("copied"), 900);
+      toast("Direct link copied — paste into IDM.", "ok", { icon: "copy" });
+    });
+    card.querySelector(".fab-dl").addEventListener("click", async (e) => {
+      const btn = e.currentTarget;
+      btn.innerHTML = `<span class="spinner"></span>`;
+      try {
+        await window.API.startDownload({ url: r.url, title: r.title || "", file_type: mode === "videos" ? "video" : "image" });
+        toast("Added to the download queue.", "ok", { icon: "dl", actionLabel: "View", onAction: () => S.emit("nav", "view-downloads") });
+      } catch (err) { toast(err.message, "err"); }
+      finally { btn.innerHTML = `<span>${ICONS.svg("download")}</span>`; }
+    });
+    card.addEventListener("dblclick", () => window.open(r.url, "_blank", "noopener"));
+    return card;
+  }
+  function fmtDurationLocal(sec) {
+    sec = Math.round(sec || 0);
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return (h ? `${h}:` : "") + String(m).padStart(h ? 2 : 1, "0") + ":" + String(s).padStart(2, "0");
   }
 
   function wireCard(card, r, letterFallback) {
@@ -322,6 +388,97 @@
   }
 
   function escapeHtml(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+
+  /* ── SafeSearch quick toggle (persisted; default OFF) ────────────────── */
+  function wireSafePill() {
+    const pill = $("#safe-pill");
+    const paintPill = () => {
+      const on = !!S.settings.safe_search;
+      pill.classList.toggle("on", !on);
+      pill.innerHTML = `<span class="dot" style="--eng-c:${on ? "var(--warn)" : "var(--ok)"}"></span>SafeSearch: <b>${on ? "ON" : "OFF"}</b>`;
+      pill.title = on ? "SafeSearch filters adult results out — click to see everything" : "Showing unfiltered results — click to re-enable SafeSearch";
+    };
+    pill.addEventListener("click", async () => {
+      try {
+        S.settings = await window.API.saveSettings({ safe_search: !S.settings.safe_search });
+        paintPill();
+        if (S.lastQuery && !state.loading) run();
+      } catch (e) { toast(e.message, "err"); }
+    });
+    paintPill();
+  }
+
+  /* ── per-type advanced filters ───────────────────────────────────────── */
+  const FILTER_DEFS = {
+    images: { label: "Images", fields: [
+      { key: "size", label: "Min size", opts: [["", "Any"], ["large", "≥ 800"], ["hd", "HD 1280+"], ["uhd", "4K+"] ] },
+      { key: "aspect", label: "Aspect", opts: [["", "Any"], ["square", "Square"], ["wide", "Landscape"], ["tall", "Portrait"]] },
+      { key: "color", label: "Color", opts: [["", "Any"], ["red", "Red"], ["orange", "Orange"], ["yellow", "Yellow"], ["green", "Green"], ["teal", "Teal"], ["blue", "Blue"], ["purple", "Purple"], ["pink", "Pink"], ["brown", "Brown"], ["black", "Black"], ["white", "White"], ["gray", "Gray"], ["transparent", "Transparent"]] },
+      { key: "type", label: "Kind", opts: [["", "Any"], ["photo", "Photo"], ["clipart", "Clipart"], ["line", "Line art"], ["animated", "GIF"], ["greyscale", "B&amp;W"]] },
+    ] },
+    videos: { label: "Videos", fields: [
+      { key: "duration", label: "Length", opts: [["", "Any"], ["short", "Under 4 min"], ["medium", "4–20 min"], ["long", "Over 20 min"]] },
+      { key: "min_res", label: "Min height", opts: [["", "Any"], ["480", "480p+"], ["720", "720p+"], ["1080", "1080p+"]] },
+    ] },
+  };
+
+  let popEl = null;
+  function activeFilterCount() {
+    return Object.values(S.searchFilters).reduce((n, g) => n + Object.values(g || {}).filter(Boolean).length, 0);
+  }
+  function wireFiltersPop() {
+    const btn = $("#filters-btn");
+    btn.innerHTML = `${ICONS.svg("shield")} Filters<span class="fb-count hidden"></span>`;
+    const badge = () => {
+      const n = activeFilterCount();
+      const b = btn.querySelector(".fb-count");
+      b.textContent = n; b.classList.toggle("hidden", !n);
+    };
+    btn.addEventListener("click", (e) => { e.stopPropagation(); popEl ? closePop() : openPop(badge); });
+    badge();
+    window.__wfFiltersBadge = badge;
+  }
+  function closePop() { popEl?.remove(); popEl = null; document.removeEventListener("pointerdown", outside); }
+  function outside(e) { if (popEl && !popEl.contains(e.target) && !e.target.closest("#filters-btn")) closePop(); }
+  function openPop(badge) {
+    closePop();
+    popEl = el("div", { class: "popover" });
+    for (const [group, def] of Object.entries(FILTER_DEFS)) {
+      popEl.append(el("div", { class: "pop-group" },
+        el("h4", {}, def.label),
+        ...def.fields.map((fd) => {
+          const row = el("div", { class: "frow" });
+          const val = S.searchFilters[group]?.[fd.key] || "";
+          const opts = el("div", { class: "pillrow" });
+          for (const [v, lab] of fd.opts) {
+            const b = el("button", { class: `fopt${String(val) === String(v) ? " on" : ""}`, type: "button" });
+            b.innerHTML = lab;
+            b.addEventListener("click", () => {
+              S.searchFilters[group] = S.searchFilters[group] || {};
+              if (v === "") delete S.searchFilters[group][fd.key]; else S.searchFilters[group][fd.key] = v;
+              [...opts.children].forEach((x) => x.classList.remove("on")); b.classList.add("on");
+              badge();
+              if (S.lastQuery && !state.loading) run();
+            });
+            opts.append(b);
+          }
+          row.append(el("span", { class: "f-label" }, fd.label), opts);
+          return row;
+        })));
+    }
+    popEl.append(el("div", { class: "pop-foot" },
+      el("span", {}, "Color/kind filters ride Bing's image index; size & aspect are also enforced locally."),
+      el("button", { class: "btn btn-ghost btn-sm", onclick: () => {
+        S.searchFilters = { images: {}, videos: {} };
+        closePop(); badge();
+        if (S.lastQuery && !state.loading) run();
+      } }, "Reset")));
+    document.body.append(popEl);
+    const r = $("#filters-btn").getBoundingClientRect();
+    popEl.style.top = `${r.bottom + 8}px`;
+    popEl.style.left = `${Math.max(12, Math.min(r.left - 180, innerWidth - r.width))}px`;
+    requestAnimationFrame(() => document.addEventListener("pointerdown", outside));
+  }
 
   window.SearchView = { init, run };
 })();

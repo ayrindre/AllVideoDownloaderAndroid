@@ -87,11 +87,23 @@ WS client auto-falls back to `GET /api/downloads` polling (1.4 s) whenever the s
 | `ytdlp` | `yt_dlp.YoutubeDL({...}).download()` in a thread; `progress_hooks` push into the same `job.update` stream; format strings like `bestvideo[height<=1080]+bestaudio/best[height<=1080]`; `DownloadCancelled` for cancel |
 | `sim` | deterministic-ish fake transfer (seeded RNG wobble), writes a real placeholder file, drives the identical UI path |
 
+### Vertical search (`core/verticals.py`)
+`search_images` / `search_videos` fan out to the engines' own media indexes in parallel:
+DDG needs a two-step handshake (fetch `duckduckgo.com/?q=…&ia=images` → extract `vqd` token →
+call `i.js`/`v.js?o=json`), Bing Images embeds escaped-JSON per item (`m="{&quot;murl&quot;…}"`)
+plus server-side `qft` filter tokens, Google isch is regex-scraped after un-escaping `\u002F`.
+Results normalize to `{title,url,thumb,page,width,height,duration,engine,file_type,is_direct}`;
+local post-filters (size/aspect/duration/min-res) run after merge, then dedupe. Zero vertical
+results ⇒ the API transparently falls back to dorked web search so the user never sees an empty
+screen when only the verticals got blocked.
+
 ### Analysis routing (`core/media.py::analyze`)
 ```
 magnet: → magnet           (copy / hand off — never “downloaded”)
 .m3u8/.mpd or mpegurl → hls (ffprobe metadata in card)
 else yt-dlp extract_info   → media (title, thumb, duration, per-height format table)
+     └ extract_info failed but the URL matches a registered extractor
+       (yt_dlp.extractor.gen_extractors) → media_error + fix hints   ← never a fake "page"
 else HEAD/GET probe        → direct  (size, content-type, ranges support)
 else HTML scan (regex over 12 media extensions) → page + candidate list
 ```

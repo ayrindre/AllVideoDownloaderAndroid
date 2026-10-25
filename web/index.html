@@ -79,7 +79,9 @@
             <div class="filter-row filter-row-sub">
               <div class="engine-set" id="engine-set" aria-label="Search engines"><!-- engine pills injected --></div>
               <div class="search-extras">
-                <label class="switch-line" title="Scan result pages for hidden direct file links">
+                <button type="button" class="epill" id="safe-pill" title="SafeSearch — off returns every result the engine indexes"></button>
+                <button type="button" class="epill filters-btn" id="filters-btn" title="Per-file-type search filters"></button>
+                <label class="switch-line" id="resolve-wrap" title="Scan result pages for hidden direct file links (web results only)">
                   <input type="checkbox" id="opt-resolve" checked /><span class="switch"></span>
                   <span class="switch-txt">Deep-link scan</span>
                 </label>
