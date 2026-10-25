@@ -40,6 +40,7 @@ class MediaDownloadRequest(BaseModel):
     url: str
     title: str = ""
     format: dict = Field(default_factory=dict)
+    referer: str = ""        # hosting page for hotlink-guarded CDNs
 
 
 class SettingsPatch(BaseModel):
@@ -52,7 +53,7 @@ class SettingsPatch(BaseModel):
 @router.get("/meta")
 async def meta():
     ff = find_ffmpeg()
-    from ..core import ytcli
+    from ..core import net, sites, ytcli
     engine = ytcli.detect()
     ytdlp_version = engine["cli_version"] if engine["use_cli"] else (engine["module_version"] or None)
     return {
@@ -65,6 +66,8 @@ async def meta():
                               "module_version": engine["module_version"],
                               "cli_version": engine["cli_version"]},
             "desktop": bool(os.environ.get("WEBFINDER_DESKTOP")),
+            "tls_impersonation": net.has_impersonation(),
+            "sites": {"recipes": len(sites.RECIPES)},
         },
         "config_file": str(CONFIG_FILE),
     }
@@ -156,6 +159,19 @@ async def exit_app():
     return {"ok": True, "msg": "All Video Downloader is closing."}
 
 
+@router.get("/sites")
+async def sites_catalog():
+    """Built-in recipes: which sites the engine already understands, and how.
+
+    Data-driven by design — adding a site is one line in ``core/sites.py``.
+    """
+    from ..core import net, sites
+    return {"count": len(sites.RECIPES),
+            "impersonation": net.has_impersonation(),
+            "families": sorted(sites.FAMILIES),
+            "recipes": sites.catalog()}
+
+
 # ---------------------------------------------------------------------------
 # Smart link analysis — the whole app hangs off this one endpoint
 # ---------------------------------------------------------------------------
@@ -177,6 +193,8 @@ async def analyze(body: AnalyzeRequest):
 @router.post("/analyze/download")
 async def analyze_download(body: MediaDownloadRequest):
     plan = await media.plan_download(body.url, title=body.title, fmt=body.format)
+    if body.referer:
+        plan.setdefault("meta", {})["referer"] = body.referer
     if plan["kind"] == "magnet":
         raise HTTPException(400, "Magnet links can only be copied — open them with your torrent client.")
     job = manager.enqueue(url=plan["url"], kind=plan["kind"],

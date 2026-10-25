@@ -22,12 +22,13 @@ a = Analysis(
     datas=[(web_dir, "web")],                 # frontend bundled read-only
     hiddenimports=[
         "webfinder", "webfinder.app", "webfinder.api", "webfinder.core",
-        "webfinder.core.downloader", "webfinder.core.media", "webfinder.core.dorks",
-        "webfinder.core.ffmpeg_tools", "webfinder.engines",
+        "webfinder.core.downloader", "webfinder.core.media", "webfinder.core.embed",
+        "webfinder.core.sites", "webfinder.core.net", "webfinder.core.ytcli",
+        "webfinder.core.ffmpeg_tools", "webfinder.core.ffmpeg_setup",
         "webfinder.desktop.window",
         "uvicorn.logging", "uvicorn.loops.asyncio", "uvicorn.protocols.http.h11_impl",
         "uvicorn.protocols.websockets.wsproto_impl", "websockets",
-        "yt_dlp", "httpx", "h2",
+        "yt_dlp", "httpx", "h2", "curl_cffi",
     ],
     hookspath=[],
     runtime_hooks=[],

@@ -157,6 +157,12 @@
         el("div", { class: "kv" }, el("span", { class: "k" }, "Shell"), el("span", { class: "v" }, m.system.desktop ? "pywebview · frameless · WebView2" : "browser dev mode")),
         el("div", { class: "kv" }, el("span", { class: "k" }, "Backend"), el("span", { class: "v" }, `Python ${m.python} · FastAPI`)),
         el("div", { class: "kv" }, el("span", { class: "k" }, "Platform"), el("span", { class: "v" }, m.platform)),
+        el("div", { class: "kv" }, el("span", { class: "k" }, "Site recipes"),
+          el("span", { class: "v" }, `${m.system.sites?.recipes || 0} sites · player-config engine`)),
+        el("div", { class: "kv" }, el("span", { class: "k" }, "TLS impersonation"),
+          el("span", { class: "v" }, m.system.tls_impersonation
+            ? "on · curl_cffi (browser fingerprint for bot walls)"
+            : "off · pip install curl_cffi to beat Cloudflare 403s")),
         el("div", { class: "kv" }, el("span", { class: "k" }, "Settings file"), el("span", { class: "v" }, el("code", {}, m.config_file)))));
   }
 

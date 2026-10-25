@@ -23,6 +23,12 @@ from functools import lru_cache
 from ..config import settings
 
 _ERR_MARKERS = re.compile(r"could not copy|cookie database|browser cookies", re.I)
+# "the site refused us as a non-browser" — the case TLS impersonation fixes
+_BLOCK_MARKERS = re.compile(
+    r"\b403\b|\b429\b|forbidden|cloudflare|just a moment|attention required"
+    r"|access denied|captcha|ddos|unusual traffic|blocked by|request blocked"
+    r"|sign in to confirm", re.I)
+_IMPERSONATE_TARGET = "chrome"
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\[[0-9;]*m")
 _ERR_PREFIX_RE = re.compile(r"^(?:\s*ERROR:\s*)+", re.I)
 
@@ -89,6 +95,39 @@ def _cookie_flags() -> list[str]:
     return ["--cookies-from-browser", b] if b else []
 
 
+@lru_cache(maxsize=1)
+def impersonation_available() -> bool:
+    """yt-dlp can impersonate a browser's TLS fingerprint (needs curl_cffi)."""
+    try:
+        import curl_cffi  # noqa: F401
+    except Exception:  # noqa: BLE001 — optional dependency
+        return False
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget  # noqa: F401
+    except Exception:  # noqa: BLE001 — older yt-dlp
+        return False
+    return True
+
+
+def impersonate_target():
+    """Value for yt-dlp's ``impersonate`` option, or None when unavailable."""
+    if not impersonation_available():
+        return None
+    try:
+        from yt_dlp.networking.impersonate import ImpersonateTarget
+        return ImpersonateTarget.from_str(_IMPERSONATE_TARGET)
+    except Exception:  # noqa: BLE001
+        return _IMPERSONATE_TARGET
+
+
+def impersonate_flags() -> list[str]:
+    return ["--impersonate", _IMPERSONATE_TARGET] if impersonation_available() else []
+
+
+def looks_blocked(msg: str) -> bool:
+    return bool(_BLOCK_MARKERS.search(msg or ""))
+
+
 def common_flags(*, referer: str = "", client: dict | None = None) -> list[str]:
     flags = ["--no-warnings", "--no-check-certificates",
              "--socket-timeout", "30", "--retries", "3"]
@@ -105,10 +144,12 @@ def common_flags(*, referer: str = "", client: dict | None = None) -> list[str]:
 
 def extract(url: str, *, flat: bool = False, playlist_items: str | None = None,
              noplaylist: bool = True, client: dict | None = None,
-             referer: str = "") -> tuple[dict | None, str]:
+             referer: str = "", impersonate: bool = False) -> tuple[dict | None, str]:
     """`yt-dlp -J` — returns (info, error) with the cookie-failure retry."""
     d = detect()
     args = [d["exe"], "-J"] + common_flags(referer=referer, client=client)
+    if impersonate:
+        args += impersonate_flags()
     if flat:
         args += ["--flat-playlist"]
     if playlist_items:
@@ -144,13 +185,15 @@ PROGRESS_TEMPLATE = ("AVDPROG %(progress._percent_str)s %(progress.downloaded_by
 
 def download_cmd(url: str, *, outdir: str, outstem: str, fmt: str, container: str,
                  referer: str = "", client: dict | None = None,
-                 playlist: bool = False) -> list[str]:
+                 playlist: bool = False, impersonate: bool = False) -> list[str]:
     d = detect()
     args = [d["exe"], "--newline", "--progress-template", f"download:{PROGRESS_TEMPLATE}",
             "-f", fmt, "--merge-output-format", container,
             "--concurrent-fragments", "4", "--windows-filenames",
             "-P", outdir, "-o", outstem + ".%(ext)s"]
     args += common_flags(referer=referer, client=client)
+    if impersonate:
+        args += impersonate_flags()
     if not playlist:
         args += ["--no-playlist"]
     cookies = _cookie_flags()

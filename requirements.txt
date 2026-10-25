@@ -4,6 +4,8 @@ uvicorn[standard]>=0.30
 httpx[socks]>=0.27
 pydantic>=2.7
 yt-dlp>=2024.10.7    # media platform extraction + downloads (YouTube & ~1800 sites)
+curl_cffi>=0.7       # real-Chrome TLS fingerprint: defeats Cloudflare/403 bot walls (optional
+                     # for correctness, but tube/host sites refuse plain HTTP clients)
 
 # --- Windows desktop shell (recommended) --------------------------------
 pywebview>=5.1       # WebView2 (Chromium) window: frameless, HW-accelerated
