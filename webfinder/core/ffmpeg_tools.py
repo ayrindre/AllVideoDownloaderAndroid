@@ -42,6 +42,12 @@ def find_ffmpeg() -> dict:
         return ""
 
     ffmpeg, ffprobe = locate("ffmpeg"), locate("ffprobe")
+    if not (ffmpeg and ffprobe):
+        # one-shot auto-heal: fetch the official build into <app>/bin (no-op when
+        # already tried, disabled via WEBFINDER_NO_FFMPEG_INSTALL=1)
+        from . import ffmpeg_setup
+        if ffmpeg_setup.ensure_ffmpeg():
+            ffmpeg, ffprobe = locate("ffmpeg"), locate("ffprobe")
     return {"ffmpeg": ffmpeg, "ffprobe": ffprobe, "available": bool(ffmpeg and ffprobe)}
 
 

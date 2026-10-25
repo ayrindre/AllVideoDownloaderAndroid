@@ -75,6 +75,28 @@ def main() -> None:
             input("\nPress Enter to exit…")
         sys.exit(1)
 
+    # FFmpeg bootstrap (HLS/DASH capture): the console the launcher owns shows
+    # the progress; failures are strictly non-fatal (ffmpeg_tools retries once
+    # per stream job anyway). WEBFINDER_NO_FFMPEG_INSTALL=1 opts out.
+    try:
+        import shutil as _sh
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from webfinder.core import ffmpeg_setup
+        bin_dir = Path(__file__).resolve().parent / "bin"
+        suf = ".exe" if os.name == "nt" else ""
+        on_path = (bool(_sh.which("ffmpeg") and _sh.which("ffprobe"))
+                   or bool(_sh.which("ffmpeg.exe") and _sh.which("ffprobe.exe")))
+        local = (bin_dir / f"ffmpeg{suf}").exists() and (bin_dir / f"ffprobe{suf}").exists()
+        if not (on_path or local):
+            if os.environ.get("WEBFINDER_NO_FFMPEG_INSTALL"):
+                print("[webfinder] FFmpeg unavailable and auto-install disabled — HLS/DASH capture stays off.")
+            else:
+                print("[webfinder] FFmpeg missing: auto-installing into the app's bin/ folder "
+                      "(opt out with WEBFINDER_NO_FFMPEG_INSTALL=1)…")
+                ffmpeg_setup.ensure_ffmpeg(progress=lambda m: print(f"[webfinder]   {m}"))
+    except Exception as exc:  # noqa: BLE001 — never let the helper break launch
+        print(f"[webfinder] ffmpeg bootstrap skipped: {exc}")
+
     if os.environ.get("WEBFINDER_PORT_TAKEOVER"):        # launched by run.bat wrapper
         args.port = int(os.environ["WEBFINDER_PORT_TAKEOVER"])
 

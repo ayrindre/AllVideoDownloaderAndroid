@@ -115,6 +115,8 @@
     nav.addEventListener("pointerleave", () => {
       const a = nav.querySelector(".nav-item.active"); if (a) slideIndicator(a);
     });
+    $("#btn-about").innerHTML = `${ICONS.svg("info")}<span>About</span>`;
+    $("#btn-about").addEventListener("click", showAbout);
     $("#btn-collapse").innerHTML = ICONS.svg("panelLeft");
     $("#btn-collapse").addEventListener("click", () => {
       document.body.classList.toggle("rail-min");
@@ -129,6 +131,41 @@
       }
     });
     setTimeout(() => { const a = nav.querySelector(".active"); if (a) slideIndicator(a); }, 30);
+  }
+
+  /* ── About sheet (graphical, with author card) ──────────────────────────── */
+  function showAbout() {
+    const chip = (t) => el("span", { class: "about-chip" }, t);
+    const feat = (icon, title, text) => el("div", { class: "about-feat" },
+      el("span", { class: "af-ico", html: ICONS.svg(icon) }),
+      el("div", {}, el("b", {}, title), el("p", {}, text)));
+    const openExt = (u) => {
+      try { const w = window.open(u, "_blank", "noopener"); if (!w) throw new Error("blocked"); }
+      catch { window.UI.copyText(u); toast("Link copied to the clipboard.", "info"); }
+    };
+    const body = el("div", {},
+      el("div", { class: "about-hero" },
+        el("div", { class: "ah-ico", html: ICONS.svg("search") }),
+        el("div", {},
+          el("h2", {}, "WebFinder", el("i", {}, "v1.0")),
+          el("p", {}, "Dork-aware meta search for REAL files — images, videos, torrents, e-books, archives and software — with a built-in parallel download manager."))),
+      el("div", { class: "about-feats" },
+        feat("zap", "True media verticals", "One chip queries YouTube, Bing Images, apibay, Nyaa, Gutenberg, Open Library… — never padded with web-page filler."),
+        feat("search", "Google-dork aware", "filetype:, intitle:index of, site: and friends run across five engines, merged and deduped."),
+        feat("download", "IDM-ready links", "Every card exposes the direct file URL for one-click copy; the manager adds Range resume, pause, retry and speed stats."),
+        feat("shield", "Honest failures", "A blocked index shows its actual error instead of lying with irrelevant results — with the fixes that work."),
+        feat("cpu", "Native desktop shell", "pywebview window: drag, maximize/restore, native folder picker, auto-installed FFmpeg. Or run browser.bat."),
+        feat("sparkle", "Smart download plans", "HLS/DASH remux through FFmpeg; platform videos honor the exact quality you picked via yt-dlp.")),
+      el("div", { class: "about-chips" },
+        chip("pywebview"), chip("FastAPI"), chip("yt-dlp"), chip("curl-cffi"), chip("FFmpeg"), chip("httpx"), chip("WebView2")),
+      el("div", { class: "about-author" },
+        el("div", { class: "aa-ava" }, "BE"),
+        el("div", { style: { flex: "1" } },
+          el("b", {}, "Behnam Ehsani"),
+          el("p", {}, "Design · code · relentless edge-case hunting")),
+        el("button", { class: "btn btn-ghost btn-sm", onclick: () => openExt("mailto:inbox.ehsani@gmail.com") }, "Email"),
+        el("button", { class: "btn btn-ghost btn-sm", onclick: () => openExt("https://github.com/wrappedman") }, "GitHub")));
+    window.UI.modal({ title: "About WebFinder", body, actions: [{ label: "Close", primary: true }] });
   }
 
   function slideIndicator(target) {

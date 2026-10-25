@@ -176,15 +176,29 @@ def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
             "playlist_items": "1", "noplaylist": True, "socket_timeout": 15}
     errors: list[str] = []
     info = None
-    # Two attempts: default client, then YouTube's mobile client (defeats many web walls).
-    for extra in ({}, {"extractor_args": {"youtube": {"player_client": ["android", "tv"]}}}):
+    # Mobile/TV clients FIRST: anonymous requests from flagged IPs get a
+    # 640×480-capped format map from the plain web client — that made the
+    # quality picker lie ("selected 1080, downloaded 480"). We take whichever
+    # attempt yields the RICHER map, and merge format lists when both answer.
+    infos: list[dict] = []
+    for extra in ({"extractor_args": {"youtube": {"player_client": ["android", "tv"]}}}, {}):
         try:
             with yt_dlp.YoutubeDL(base_yt_opts({**base, **extra})) as ydl:
-                info = ydl.extract_info(url, download=False)
-            break
+                infos.append(ydl.extract_info(url, download=False))
         except Exception as exc:  # noqa: BLE001 — "no extractor" is the normal case
             errors.append(str(exc).replace("\n", " ")[:220])
-            info = None
+        if infos and max((f.get("height") or 0) for f in (infos[-1].get("formats") or [{"height": 0}])) > 480:
+            break
+    if len(infos) == 2:
+        a, b = infos
+        if len(b.get("formats") or []) > len(a.get("formats") or []):
+            a, b = b, a
+        have = {f.get("format_id") for f in a.get("formats") or []}
+        info = dict(a)
+        info["formats"] = (a.get("formats") or []) + [f for f in (b.get("formats") or [])
+                                                        if f.get("format_id") not in have]
+    else:
+        info = infos[0] if infos else None
     if not info:
         return None, " · ".join(dict.fromkeys(errors))
     if info.get("_type") == "playlist":
@@ -499,6 +513,30 @@ def demo_ebook_results(query: str, limit: int) -> dict:
             "engines": [{"engine": e, "ok": True, "error": "", "count": 7}
                         for e in ("gutenberg", "internetarchive")],
             "results": results}
+
+
+def demo_software_results(query: str, limit: int) -> dict:
+    import hashlib
+    results = []
+    for i, (ft, host) in enumerate([("exe", "github.com"), ("apk", "f-droid.org"),
+                                    ("msi", "github.com"), ("zip", "files.example.org"),
+                                    ("dmg", "github.com"), ("apk", "f-droid.org"),
+                                    ("AppImage", "github.com"), ("deb", "github.com")]):
+        seed = hashlib.md5(f"s{query}{i}".encode()).hexdigest()[:10]
+        results.append({
+            "title": f"{query.title()} {['2.1.0', '11.4', '0.9.3', '3.0.1'][i % 4]} ({ft}) — demo release",
+            "url": f"https://cdn.{host}/releases/{seed}/{query.replace(' ', '-').lower()}-{i}.{ft.lower()}",
+            "thumb": "", "page": f"https://{host}/owner/{query.replace(' ', '-').lower()}",
+            "domain": host, "engine": ["github", "fdroid", "bing"][i % 3],
+            "snippet": "Demo asset — demo mode is ON in Settings.",
+            "size_bytes": (i + 3) * 14_700_000, "file_type": ft, "is_direct": True,
+            "width": 0, "height": 0, "duration": None, "publisher": f"{query.split()[0].title()} project",
+        })
+    return {"query": query, "raw_query": query, "types": ["software"], "mode": "software",
+            "elapsed_ms": 21, "filters": {}, "vertical_blocked": False, "demo": True,
+            "engines": [{"engine": e, "ok": True, "error": "", "count": 3}
+                        for e in ("github", "fdroid", "web_dorks")],
+            "results": results[:limit]}
 
 
 def demo_archive_results(query: str, limit: int) -> dict:

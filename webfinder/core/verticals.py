@@ -166,16 +166,21 @@ async def _bing_images(client: httpx.AsyncClient, query: str, f: dict, limit: in
         base["qft"] = qft
     if not safe:
         base.update({"adlt": "off", "safeSearch": "off"})
+    # /images/async IGNORES the adlt param unless the profile cookie says Off —
+    # without this the toggle was decorative and every result stayed filtered.
+    bing_cookies = None if safe else {"SRCHHPGUSR": "ADLT=Off"}
     # Strategy 1: the async fragment endpoint (stable markup for years).
     r = await client.get("https://www.bing.com/images/async",
                          params={**base, "first": 1, "mmasync": 1,
-                                 "sapi": "images", "tsc": "ImageDetailMenu"})
+                                 "sapi": "images", "tsc": "ImageDetailMenu"},
+                         cookies=bing_cookies)
     out = _parse_bing_items(r.text, limit)
     if out:
         return out
     # Strategy 2: full results page (m="..." anchors).
     r = await client.get("https://www.bing.com/images/search",
-                         params={**base, "form": "HDRSC2", "first": 1, "view": "detail", "async": "content"})
+                         params={**base, "form": "HDRSC2", "first": 1, "view": "detail", "async": "content"},
+                         cookies=bing_cookies)
     out = _parse_bing_items(r.text, limit)
     if out:
         return out
@@ -197,7 +202,7 @@ async def _ddg_images(client: httpx.AsyncClient, query: str, limit: int, safe: b
     vqd = await _ddg_vqd(client, query, "images")
     r = await client.get("https://duckduckgo.com/i.js",
                          params={"l": "us-en", "o": "json", "q": query, "vqd": vqd,
-                                 "s": "off" if not safe else "active"},
+                                 "s": "off" if not safe else "active", "safeSearch": "off" if not safe else "active"},
                          headers={"Referer": "https://duckduckgo.com/"})
     try:
         data = r.json()
@@ -348,7 +353,7 @@ async def _ddg_videos(client: httpx.AsyncClient, query: str, limit: int, safe: b
     vqd = await _ddg_vqd(client, query, "videos")
     r = await client.get("https://duckduckgo.com/v.js",
                          params={"l": "us-en", "o": "json", "q": query, "vqd": vqd,
-                                 "s": "off" if not safe else "active"},
+                                 "s": "off" if not safe else "active", "safeSearch": "off" if not safe else "active"},
                          headers={"Referer": "https://duckduckgo.com/"})
     try:
         data = r.json()
@@ -408,34 +413,112 @@ async def _bing_videos(client: httpx.AsyncClient, query: str, f: dict, limit: in
     return out
 
 
-async def _video_dork_fallback(client: httpx.AsyncClient, query: str, limit: int, safe: bool) -> list[dict]:
-    """Web results restricted to video-file dorks — catches what the verticals miss.
+_FILE_EXT_RX = {
+    "video": re.compile(r"\.(mp4|mkv|webm|mov|m4v|avi|flv|wmv|3gp|ts)(\?|#|$)", re.I),
+    "app": re.compile(r"\.(exe|msi|msix|appx|zip|7z|rar|dmg|pkg|deb|rpm|apk|appimage|portable)(\?|#|$)", re.I),
+}
+_PLAYABLE_HOST_RX = re.compile(r"(youtube\.com/watch\?v=|youtu\.be/|vimeo\.com/\d|dailymotion\.com/video)", re.I)
 
-    Runs the *engines'* dork flow inside this client so it fails/succeeds with the
-    same network conditions the verticals saw.
-    """
+
+async def _dork_files_fallback(client: httpx.AsyncClient, query: str, dork_type: str,
+                               limit: int, safe: bool) -> list[dict]:
+    """Web engines run with the file-type dork, then HARD-GATED: a result only
+    survives when the URL itself ends in a real media/program extension (or is
+    a playable watch-page). Bing's RSS endpoint happily ignores `filetype:`
+    and returns dictionary/LinkedIn spam otherwise — that leaked before."""
     from ..engines import ENGINES
-    from ..core import dorks as dk
-    full = dk.build_query(query, ["video"])
+    from . import dorks as dk
+    rx = _FILE_EXT_RX[dork_type]
+    full = dk.build_query(query, [dork_type if dork_type != "app" else "software"])
     out: list[dict] = []
     seen: set[str] = set()
-    for name in ("bing", "duckduckgo"):
+    for name in ("google", "bing", "duckduckgo"):
+        if name not in ENGINES:
+            continue
         try:
-            # NOTE: ENGINES maps bare names — "search_bing" caused a silent
-            # KeyError that used to kill the whole dorked-video source.
-            res = await ENGINES[name](client, full, min(limit, 40), safe)
+            res = await ENGINES[name](client, full, min(max(limit, 20), 60), safe)
         except Exception:  # noqa: BLE001 — supplementary source only
             continue
         for r in res:
             if r["url"] in seen:
                 continue
+            playable = dork_type == "video" and _PLAYABLE_HOST_RX.search(r["url"])
+            if not rx.search(r["url"]) and not playable:
+                continue          # pages ABOUT files never pass the gate
             seen.add(r["url"])
             r.setdefault("thumb", "")
-            r.setdefault("page", "")
+            r.setdefault("page", "" if playable else r.get("url", ""))
             r.setdefault("duration", None)
-            r["is_direct"] = True      # these ARE direct file urls (filetype: dorks)
-            r["file_type"] = r.get("file_type") or "video"
+            r["is_direct"] = bool(not playable and rx.search(r["url"]))
+            r["file_type"] = r.get("file_type") or ("video" if dork_type == "video" else "app")
+            r["engine"] = r.get("engine") or name
             out.append(r)
+    return out
+
+
+async def _video_dork_fallback(client: httpx.AsyncClient, query: str, limit: int, safe: bool) -> list[dict]:
+    return await _dork_files_fallback(client, query, "video", limit, safe)
+
+
+YT_CONSENT = {"CONSENT": "YES+cb.20220419-08-p0.en.LX.ALL",
+              "SOCS": "CAISHAgBEhJnd3NfMjAyMjA0MjAtMF9SQzIaAmRlIAEaBgiA_LyuBg"}
+
+
+async def _youtube_videos(client: httpx.AsyncClient, query: str, limit: int, safe: bool) -> list[dict]:
+    """YouTube's own search (parses the ytInitialData JSON blob). Bing/DDG video
+    indexes miss regional creators entirely; YouTube never does. Results are
+    watch-URLs the yt-dlp download pipeline handles natively, with duration +
+    thumbnail + channel. SafeSearch uses YouTube's strict-filter `sp` token."""
+    params: dict[str, str] = {"search_query": query, "hl": "en", "gl": "US"}
+    if safe:
+        params["sp"] = "EgIyAg%3D%3D"
+    try:
+        r = await client.get("https://www.youtube.com/results", params=params, cookies=YT_CONSENT)
+        r.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(f"YouTube search unreachable ({type(exc).__name__})") from exc
+    m = re.search(r"var ytInitialData = (\{.*?\});</script>", r.text)
+    if not m:
+        raise RuntimeError("YouTube search page changed (or served a consent/captcha wall)")
+    try:
+        import json as _json
+        data = _json.loads(m.group(1))
+    except ValueError as exc:
+        raise RuntimeError("YouTube search JSON parse failed (layout change)") from exc
+
+    def _walk(o):
+        if isinstance(o, dict):
+            if "videoRenderer" in o:
+                yield o["videoRenderer"]
+            for v in o.values():
+                yield from _walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                yield from _walk(v)
+
+    out: list[dict] = []
+    for vr in _walk(data):
+        vid = vr.get("videoId") or ""
+        if not vid:
+            continue
+        txt = lambda node: "".join(run.get("text", "") for run in ((node or {}).get("runs") or []))
+        title = txt(vr.get("title")).strip()
+        owner = txt(vr.get("ownerText") or vr.get("longBylineText")).strip()
+        length = ((vr.get("lengthText") or {}).get("simpleText") or "").strip()
+        views = ((vr.get("viewCountText") or {}).get("simpleText") or "").strip()
+        published = ((vr.get("publishedTimeText") or {}).get("simpleText") or "").strip()
+        thumbs = (vr.get("thumbnail") or {}).get("thumbnails") or []
+        secs = _parse_len(length)
+        out.append(_mk(f"https://www.youtube.com/watch?v={vid}",
+                       thumbs[-1].get("url") if thumbs else "",
+                       title or vid, "", 0, 0, "youtube",
+                       snippet=" · ".join(x for x in (views, published) if x)[:180],
+                       duration=secs or None, file_type="video", is_direct=False,
+                       publisher=owner))
+        if len(out) >= limit:
+            break
+    if not out:
+        raise RuntimeError("YouTube search returned no videos")
     return out
 
 
@@ -446,6 +529,7 @@ async def search_videos(query: str, filters: dict | None, limit: int, safe: bool
     results: list[dict] = []
     async with _client(proxy=proxy) as client:
         jobs = {
+            "youtube": _youtube_videos(client, query, limit, safe),
             "bing": _bing_videos(client, query, f, limit, safe),
             "duckduckgo": _ddg_videos(client, query, limit, safe),
             "web_dorks": _video_dork_fallback(client, query, limit, safe),
@@ -576,6 +660,35 @@ async def _1337x(client: httpx.AsyncClient, query: str, limit: int) -> list[dict
 _SIZE_UNITS = {"b": 1, "kb": 1024, "mb": 1024**2, "gb": 1024**3, "tb": 1024**4}
 
 
+async def _torlock(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    """Torlock — big general catalog, advertises zero fake torrents. HTML rows;
+    parser is deliberately loose and fails LOUD when the layout moves so the
+    engine strip tells the truth instead of showing a silent zero."""
+    slug = re.sub(r"[^a-zA-Z0-9]+", "-", query).strip("-").lower() or "search"
+    r = await client.get(f"https://www.torlock.com/all/torrents/{slug}.html")
+    r.raise_for_status()
+    out: list[dict] = []
+    for block in re.split(r"<tr\b", r.text):
+        mm = re.search(r'href="(?:https?://www\.torlock\.com)?(/[^"]*?/torrent/(\d+)[^"]*?)"[^>]*>([^<]{4,160})<', block)
+        if not mm:
+            continue
+        page, tid, name = mm.group(1), mm.group(2), _unesc(mm.group(3)).strip()
+        seeds_m = re.search(r'class="c1s?">\s*(\d+)', block) or re.search(r">(\d+)\s*</td>\s*<td[^>]*>\s*\d+\s*</td>", block)
+        size_m = re.search(r"(\d+(?:[.,]\d+)?\s*(?:KB|MB|GB|TB))", block)
+        mag_m = re.search(r'href="(magnet:[^"]+)"', block)
+        url = _unesc(mag_m.group(1)) if mag_m else f"https://www.torlock.com/download/{tid}.torrent"
+        out.append(_torrent(name, url, page="https://www.torlock.com" + page if page.startswith("/") else page,
+                            torrent_url=f"https://www.torlock.com/download/{tid}.torrent",
+                            size=_human_size(size_m.group(1)) if size_m else None,
+                            seeds=int(seeds_m.group(1)) if seeds_m else 0,
+                            source="torlock"))
+        if len(out) >= limit:
+            break
+    if not out:
+        raise RuntimeError("Torlock markup changed — parser needs an update")
+    return out
+
+
 def _human_size(text: str) -> int:
     m = re.search(r"(\d+(?:[.,]\d+)?)\s*(B|kB|KB|MB|GB|TB)", text)
     if not m:
@@ -593,6 +706,7 @@ async def search_torrents(query: str, filters: dict | None, limit: int, safe: bo
             "apibay": _apibay(client, query, limit),
             "nyaa": _nyaa(client, query, limit),
             "1337x": _1337x(client, query, limit),
+            "torlock": _torlock(client, query, limit),
         }
         gathered = await asyncio.gather(*jobs.values(), return_exceptions=True)
     for name, res in zip(jobs, gathered):
@@ -635,8 +749,8 @@ async def _gutendex(client: httpx.AsyncClient, query: str, limit: int) -> list[d
 
 async def _internet_archive(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
     r = await client.get("https://archive.org/advancedsearch.php", params={
-        "q": f"({query}) AND mediatype:(texts)", "fl[]": ["identifier", "title", "year"],
-        "rows": min(max(limit // 2, 8), 20), "page": 1, "output": "json",
+        "q": f"{query} AND mediatype:(texts)", "fl[]": ["identifier", "title", "year"],
+        "rows": min(max(limit, 20), 40), "page": 1, "output": "json",
         "sort[]": "downloads desc"})
     r.raise_for_status()
     docs = (((r.json() or {}).get("response") or {}).get("docs")) or []
@@ -644,37 +758,117 @@ async def _internet_archive(client: httpx.AsyncClient, query: str, limit: int) -
         raise RuntimeError("Internet Archive found no matching texts")
 
     async def one(doc: dict) -> dict | None:
-        ident = doc.get("identifier") or ""
-        title = htmllib.unescape(str(doc.get("title") or ident)) + (f" ({doc['year']})" if doc.get("year") else "")
-        item = {"title": title, "url": "", "thumb": f"https://archive.org/services/img/{ident}",
-                "page": f"https://archive.org/details/{ident}", "domain": "archive.org",
-                "width": 0, "height": 0, "engine": "internetarchive", "snippet": "",
-                "size_bytes": None, "duration": None, "file_type": "book", "is_direct": False,
-                "publisher": "", "year": str(doc.get("year") or "")}
-        try:  # metadata → pick a real downloadable file
-            meta = (await client.get(f"https://archive.org/metadata/{ident}")).json()
-            server, root = meta.get("server"), meta.get("dir") or ""
-            best = None
-            for fil in ((meta.get("files") or [])):
-                name = (fil.get("name") or "").lower()
-                if name.endswith((".pdf", ".epub", ".djvu")):
-                    pref = {".pdf": 0, ".epub": 1, ".djvu": 2}[name[-4:]]
-                    if best is None or pref < best[0]:
-                        best = (pref, fil.get("name"), int(fil.get("size") or 0))
-            if best and server:
-                item["url"] = f"https://{server}/download/{ident}/{quote_plus(best[1])}"
-                item["size_bytes"] = best[2] or None
-        except Exception:  # noqa: BLE001 — details stay optional
-            pass
-        return item
+        return await _ia_resolve(client, doc.get("identifier") or "",
+                                 htmllib.unescape(str(doc.get("title") or "")) or str(doc.get("identifier") or ""),
+                                 str(doc.get("year") or ""))
 
-    gathered = await asyncio.gather(*(one(d) for d in docs[:10]), return_exceptions=True)
+    gathered = await asyncio.gather(*(one(d) for d in docs[:14]), return_exceptions=True)
     out = [g for g in gathered if isinstance(g, dict) and g["url"]]
     if not out:
         # keep read-only entries as fallback so the source still contributes
         out = [g for g in gathered if isinstance(g, dict)]
     if not out:
         raise RuntimeError("Internet Archive metadata fetch failed")
+    return out
+
+
+async def _ia_resolve(client: httpx.AsyncClient, ident: str, title: str, year: str = "") -> dict | None:
+    """Resolve an archive.org identifier to a REAL downloadable book file
+    (prefers EPUB → PDF → DJVU via the metadata API). Shared by the Internet
+    Archive and Open Library sources."""
+    if not ident:
+        return None
+    item = {"title": (title or ident)[:160], "url": "", "thumb": f"https://archive.org/services/img/{ident}",
+            "page": f"https://archive.org/details/{ident}", "domain": "archive.org",
+            "width": 0, "height": 0, "engine": "internetarchive", "snippet": "",
+            "size_bytes": None, "duration": None, "file_type": "book", "is_direct": False,
+            "publisher": "", "year": year}
+    try:
+        meta = (await client.get(f"https://archive.org/metadata/{ident}")).json()
+        server = meta.get("server")
+        best = None
+        for fil in (meta.get("files") or []):
+            name = (fil.get("name") or "")
+            low = name.lower()
+            if low.endswith((".epub", ".pdf", ".djvu")):
+                pref = {".epub": 0, ".pdf": 1, ".djvu": 2}[low[-5:] if low.endswith(".epub") else low[-4:]]
+                if best is None or pref < best[0]:
+                    best = (pref, name, int(fil.get("size") or 0))
+        if best and server:
+            item["url"] = f"https://{server}/download/{ident}/{quote_plus(best[1])}"
+            item["size_bytes"] = best[2] or None
+            item["file_type"] = "book"
+    except Exception:  # noqa: BLE001 — details page is still better than nothing
+        pass
+    return item
+
+
+async def _openlibrary(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    """Open Library — the biggest book index there is (millions of records,
+    far beyond Gutenberg's public-domain set). Books linked to an archive.org
+    item get a direct EPUB/PDF file URL via the IA metadata API."""
+    r = await client.get("https://openlibrary.org/search.json", params={
+        "q": query, "limit": min(max(limit, 20), 50),
+        "fields": "key,title,author_name,first_publish_year,cover_i,ia,ebook_access",
+        "lang": "eng"})
+    r.raise_for_status()
+    docs = (r.json() or {}).get("docs") or []
+    if not docs:
+        raise RuntimeError("Open Library had no matching books")
+    seen_ia: set[str] = set()
+    picked = []
+    for d in docs:
+        ia = [x for x in (d.get("ia") or []) if x and x not in seen_ia]
+        if not ia:
+            continue                      # metadata-only rows belong to the search engine, not us
+        seen_ia.update(ia)
+        picked.append(d)
+        if len(picked) >= 12:
+            break
+    async def one(d: dict) -> dict | None:
+        ident = (d.get("ia") or [""])[0]
+        item = await _ia_resolve(client, ident, str(d.get("title") or ident), str(d.get("first_publish_year") or ""))
+        if not item:
+            return None
+        item["engine"] = "openlibrary"
+        item["publisher"] = ", ".join((d.get("author_name") or [])[:2])[:80]
+        cov = d.get("cover_i")
+        if cov:
+            item["thumb"] = f"https://covers.openlibrary.org/b/id/{cov}-M.jpg"
+        item["page"] = f"https://openlibrary.org{d.get('key', '')}"
+        return item
+    gathered = await asyncio.gather(*(one(d) for d in picked), return_exceptions=True)
+    out = [g for g in gathered if isinstance(g, dict) and g.get("url")]
+    if not out:
+        raise RuntimeError("Open Library matched books but none has a free downloadable file")
+    return out
+
+
+async def _standardebooks(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    """Standard Ebooks — curated public-domain classics, cleanly formatted
+    EPUBs straight from their OPDS catalog (no scraping of fragile HTML)."""
+    r = await client.get("https://standardebooks.org/opds/catalog", params={"q": query, "sort": "alphabetical"})
+    r.raise_for_status()
+    out: list[dict] = []
+    for entry in re.findall(r"<entry>(.*?)</entry>", r.text, re.S)[:limit]:
+        t = re.search(r"<title[^>]*>(.*?)</title>", entry, re.S)
+        href = re.search(r'<link[^>]*href="([^"]+)"[^>]*type="application/epub\+zip"', entry) or \
+               re.search(r'<link[^>]*type="application/epub\+zip"[^>]*href="([^"]+)"', entry)
+        author = re.search(r"<author>.*?<name>(.*?)</name>", entry, re.S)
+        cover = re.search(r'<link[^>]*href="([^"]+)"[^>]*type="image/jpeg"', entry)
+        slugm = re.search(r"<id>https?://standardebooks\.org/ebooks/([^<]+)</id>", entry)
+        if not (t and href):
+            continue
+        title = _unesc(re.sub(r"<[^>]+>", "", t.group(1))).strip()
+        url = href.group(1)
+        if url.startswith("/"):
+            url = "https://standardebooks.org" + url
+        out.append(_mk(url, (cover.group(1) if cover else ""),
+                       f"{title}" + (f" — {_unesc(author.group(1)).strip()}" if author else ""),
+                       f"https://standardebooks.org/ebooks/{slugm.group(1)}" if slugm else "",
+                       0, 0, "standardebooks", file_type="epub", is_direct=True, size_bytes=None))
+    if not out:
+        raise RuntimeError("Standard Ebooks had no matching titles")
     return out
 
 
@@ -687,6 +881,8 @@ async def search_ebooks(query: str, filters: dict | None, limit: int, safe: bool
         jobs = {
             "gutenberg": _gutendex(client, query, limit),
             "internetarchive": _internet_archive(client, query, limit),
+            "openlibrary": _openlibrary(client, query, limit),
+            "standardebooks": _standardebooks(client, query, limit),
         }
         gathered = await asyncio.gather(*jobs.values(), return_exceptions=True)
     for name, res in zip(jobs, gathered):
@@ -705,36 +901,47 @@ async def search_ebooks(query: str, filters: dict | None, limit: int, safe: bool
 # ═══════════════════════════════════════════════════════════════════════════
 async def search_archives(query: str, filters: dict | None, limit: int, safe: bool = False,
                           proxy: str = "") -> dict:
-    """Archives have no public media index — so we dork harder (intitle:"index of")
-    and then GATE: a result only survives when its URL or title actually names a
-    compressed file or a directory listing. Pages about zip files never pass."""
+    """Archives have no public media index — so we dork HARDER, with two parallel
+    strategies, then GATE: a result only survives when its URL or title actually
+    names a compressed file or a directory listing. Pages *about* zip files never
+    pass. One strategy alone returned zero hits for common software names — the
+    strict `intitle:"index of" (zip OR rar…)` phrasing was the culprit."""
     from ..engines import ENGINES
-    from . import dorks as dk
     f = filters or {}
     ext = (f.get("ext") or "").strip(". ")
-    mod = f"filetype:{ext}" if ext else "zip OR rar OR 7z OR tar OR gz"
-    q = f'{query} ("index of" OR "download") ({mod})'
+    mod = f"filetype:{ext}" if ext else "filetype:zip OR filetype:rar OR filetype:7z"
+    strategies = (
+        f'{query} intitle:"index of"',
+        f"{query} {mod}",
+    )
     sources: dict[str, dict] = {}
     kept: list[dict] = []
     dropped = 0
     async with _client(proxy=proxy) as client:
-        jobs = {}
-        for name in ("bing", "duckduckgo", "mojeek"):
-            if name in ENGINES:
-                jobs[name] = ENGINES[name](client, q, max(limit, 30), safe)
-        gathered = await asyncio.gather(*jobs.values(), return_exceptions=True)
-    for name, res in zip(jobs, gathered):
-        if isinstance(res, Exception):
-            sources[name] = _source_of(name, res)
+        async def one_engine(name: str) -> tuple[str, list[dict] | Exception]:
+            try:
+                rows: list[dict] = []
+                for q in strategies:
+                    rows.extend(await ENGINES[name](client, q, max(limit, 30), safe))
+                return name, rows
+            except Exception as exc:  # noqa: BLE001 — per-source honesty
+                return name, exc
+        gathered = await asyncio.gather(*(one_engine(n) for n in
+                                         ("google", "bing", "duckduckgo", "mojeek")
+                                         if n in ENGINES))
+    for res in gathered:
+        name, out = res
+        if isinstance(out, Exception):
+            sources[name] = _source_of(name, out)
             continue
-        rows = [r for r in res if _archive_relevant(r)]
-        dropped += len(res) - len(rows)
+        rows = [r for r in out if _archive_relevant(r)]
+        dropped += len(out) - len(rows)
         for r in rows:
             r.setdefault("thumb", "")
             r["file_type"] = "archive"
-            r["is_direct"] = bool(re.search(r"\.(zip|rar|7z|t?gz|bz2|xz|iso)(\?|#|$)", r["url"], re.I))
+            r["is_direct"] = bool(re.search(r"\.(zip|rar|7z|tar|t?gz|bz2|xz|iso)(\?|#|$)", r["url"], re.I))
         kept.extend(rows)
-        sources[name] = {"ok": True, "error": (f"page-only hits dropped: {len(res) - len(rows)}" if dropped else ""),
+        sources[name] = {"ok": True, "error": (f"page-only hits dropped: {len(out) - len(rows)}" if out and not rows else ""),
                          "count": len(rows)}
     kept = _dedupe(kept, key=lambda r: r["url"])[:limit]
     return {"results": kept, "sources": sources, "dropped_irrelevant": dropped}
@@ -744,3 +951,114 @@ def _archive_relevant(r: dict) -> bool:
     blob = (r.get("url", "") + " " + r.get("title", "") + " " + r.get("snippet", "")).lower()
     return bool(re.search(r"\.(zip|rar|7z|tar|t?gz|bz2|xz|iso)\b", blob)
                 or "index of" in blob or "directory listing" in blob)
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SOFTWARE vertical — real installers, not download-portal landing pages
+# ═══════════════════════════════════════════════════════════════════════════
+async def _github_releases(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    """GitHub Releases — real installer assets (exe/msi/zip/dmg/AppImage/deb/rpm).
+    Anonymous API budget is 60 req/h per IP; the fan-out is deliberately small."""
+    r = await client.get("https://api.github.com/search/repositories",
+                         params={"q": query,
+                                 "per_page": min(max(limit // 2, 8), 20)},
+                         headers={"Accept": "application/vnd.github+json"})
+    if r.status_code == 403:
+        raise RuntimeError("GitHub API rate limit (60 req/h) — try again in a few minutes")
+    r.raise_for_status()
+    items = (r.json() or {}).get("items") or []
+    if not items:
+        raise RuntimeError("GitHub found no matching repositories")
+
+    async def one_repo(it: dict) -> list[dict]:
+        try:
+            rr = await client.get(f"https://api.github.com/repos/{it.get('full_name')}/releases/latest",
+                                  headers={"Accept": "application/vnd.github+json"})
+            if rr.status_code != 200:
+                return []
+            rel = rr.json() or {}
+            tag = str(rel.get("tag_name") or "")
+            rows = []
+            for a in (rel.get("assets") or []):
+                name = str(a.get("name") or "")
+                if not re.search(r"\.(exe|msi|msix|appx|zip|7z|rar|dmg|pkg|deb|rpm|AppImage)$", name, re.I):
+                    continue
+                url = a.get("browser_download_url") or ""
+                if not url:
+                    continue
+                rows.append(_mk(url, ((it.get("owner") or {}).get("avatar_url") or ""),
+                                f"{it.get('full_name')} {tag} — {name}".strip(),
+                                it.get("html_url") or "", 0, 0, "github",
+                                snippet=str(rel.get("body") or "")[:160],
+                                file_type=name.rsplit(".", 1)[-1].lower(), is_direct=True,
+                                size_bytes=int(a.get("size") or 0) or None,
+                                publisher=str(it.get("full_name") or ""),
+                                extra={"downloads": a.get("download_count") or 0}))
+            return rows
+        except Exception:  # noqa: BLE001 — per-repo soft
+            return []
+
+    gathered = await asyncio.gather(*(one_repo(it) for it in items[:12]), return_exceptions=True)
+    out = [x for g in gathered if isinstance(g, list) for x in g]
+    if not out:
+        raise RuntimeError("GitHub repos matched but publish no downloadable release assets")
+    return out
+
+
+async def _fdroid(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    """F-Droid — open-source Android APKs, direct CDN download URLs, JSON API."""
+    r = await client.get("https://search.f-droid.org/", params={
+        "q": query, "format": "json", "limit": min(max(limit, 20), 40)})
+    if "json" not in (r.headers.get("content-type") or ""):
+        raise RuntimeError("F-Droid search API changed (no JSON)")
+    r.raise_for_status()
+    out: list[dict] = []
+    for pkg in ((r.json() or {}).get("packages") or []):
+        versions = pkg.get("versions") or []
+        if not versions:
+            continue
+        v = max(versions, key=lambda x: x.get("versionCode") or 0)
+        url = v.get("apk") or ""
+        if not url:
+            continue
+        out.append(_mk(url, "",
+                       f"{pkg.get('name') or pkg.get('packageName')} {v.get('versionName') or ''}".strip(),
+                       f"https://f-droid.org/packages/{pkg.get('packageName')}/",
+                       0, 0, "fdroid", snippet=str(pkg.get("summary") or "")[:180],
+                       file_type="apk", is_direct=True, publisher=str(pkg.get("packageName") or "")))
+        if len(out) >= limit:
+            break
+    if not out:
+        raise RuntimeError("F-Droid had no matching packages")
+    return out
+
+
+async def search_software(query: str, filters: dict | None, limit: int, safe: bool = False,
+                          proxy: str = "") -> dict:
+    """Program search must return PROGRAMS: GitHub release assets + F-Droid APKs
+    are real files; a dorked fallback catches portable zips on open mirrors.
+    Download-portal SEO pages are gated out exactly like the archive vertical."""
+    f = filters or {}
+    sources: dict[str, dict] = {}
+    results: list[dict] = []
+    async with _client(proxy=proxy) as client:
+        jobs = {
+            "github": _github_releases(client, query, limit),
+            "fdroid": _fdroid(client, query, limit),
+            "web_dorks": _dork_files_fallback(client, query, "app", limit, safe),
+        }
+        gathered = await asyncio.gather(*jobs.values(), return_exceptions=True)
+    for name, res in zip(jobs, gathered):
+        sources[name] = _source_of(name, res)
+        if not isinstance(res, Exception):
+            results.extend(res)
+    plat = (f.get("platform") or "").lower()
+    if plat == "android":
+        results = [r for r in results if (r.get("file_type") or "") == "apk"]
+    elif plat == "windows":
+        results = [r for r in results if re.search(r"\.(exe|msi|zip|7z|rar)$", r.get("url", ""), re.I)]
+    results = _dedupe(results, key=lambda r: r["url"])
+    # prefer real installers over generic archives
+    results.sort(key=lambda r: (0 if re.search(r"\.(exe|msi|apk|dmg|deb|rpm|AppImage)$", r["url"], re.I) else 1))
+    return {"results": results[:limit], "sources": sources}
+

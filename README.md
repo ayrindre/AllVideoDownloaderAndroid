@@ -71,10 +71,11 @@ vertical back to plain web search:
 | | Sources | Direct fields | Filters |
 |---|---|---|---|
 | **Images** | DuckDuckGo `i.js` JSON · Bing Images · Google `tbm=isch` | full-res URL (IDM-ready), thumb, w×h, source page | size ≥800/HD/4K · aspect · color · kind (photo/clipart/line/GIF/B&W) |
-| **Videos** | DuckDuckGo `v.js` JSON · Bing Videos · dorked web as third source | playable media URL, thumb, duration, publisher | length (<4m / 4–20m / >20m) · min height |
-| **Torrents** | The Pirate Bay (`apibay.org` JSON) · Nyaa RSS · 1337x | **magnet link** (Copy → your client), seeders/leechers/size, `.torrent` file save | min seeders |
-| **E-Books** | Project Gutenberg (`gutendex`) · Internet Archive (search + metadata) | direct EPUB/PDF file URL, cover, author, year | format (EPUB/PDF/DjVu) |
-| **Archives** | Bing + DuckDuckGo + Mojeek with `intitle:"index of"` dorks, **hard-relevance-gated** | only file URLs & directory listings survive — pages *about* zips are dropped | — |
+| **Videos** | **YouTube search itself** (`ytInitialData` JSON) · DuckDuckGo `v.js` · Bing Videos · dorked web *hard-gated to real media URLs* | playable URL or watch-page (both feed the yt-dlp downloader), thumb, duration, channel | length (<4m / 4–20m / >20m) · min height |
+| **Torrents** | The Pirate Bay (`apibay.org` JSON) · Nyaa RSS · 1337x · Torlock | **magnet link** (Copy → your client), seeders/leechers/size, `.torrent` file save | min seeders |
+| **E-Books** | Gutenberg · Internet Archive · Open Library (IA-linked files only) · Standard Ebooks (OPDS) | direct EPUB/PDF file URL, cover, author, year | format (EPUB/PDF/DjVu) |
+| **Archives** | Google + Bing + DuckDuckGo + Mojeek, two parallel strategies (`intitle:"index of"` **and** `filetype:` dorks), hard-relevance-gated | only file URLs & directory listings survive — pages *about* zips are dropped | — |
+| **Software** | GitHub Releases API (real installer assets) · F-Droid APKs · gated portable-file dorks | `.exe/.msi/.apk/.dmg/…` direct downloads with size + repo, source page | — |
 
 The **Magnet** chip merged into **Torrent**: one chip searches both `.torrent` files and
 magnet links; every card leads with **Copy magnet / Copy direct link** (IDM-safe).
@@ -87,6 +88,11 @@ with **`curl-cffi`** — a real Chrome TLS/JA3 fingerprint plus the `CONSENT`/`S
 and `gbv=1` — which defeats the "200 OK but zero results" fingerprint wall; without the
 package installed it degrades to httpx with a legacy-user-agent retry. DuckDuckGo falls
 back to its `lite` markup bucket when the main HTML endpoint comes back empty.
+
+**SafeSearch actually toggles.** Bing's image/video endpoints ignore the `adlt=off` URL
+param unless the profile cookie agrees — WebFinder sets `SRCHHPGUSR=ADLT=Off` on the wire,
+DuckDuckGo gets both `s=` and `safeSearch=`, and YouTube search gets its strict-mode `sp`
+token when SafeSearch is ON. OFF means OFF.
 
 **No garbage, ever.** If Image-only (or Video-only) finds zero media, WebFinder does **not**
 quietly swap in irrelevant web pages — it shows an *indexes-blocked* panel listing what each
@@ -185,6 +191,10 @@ iscc build\installer.iss            # → Setup wizard (optional bundled ffmpeg 
 | Verticals (image/video/torrent/ebook/archive) behave like plain web search after a pull | Two causes, both fixed: a stored `vertical_mode:false` gate (removed — routing is now unconditional) and WebView2 serving **cached stale JS** (`/static` now sends `Cache-Control: no-cache` and revalidates via ETag). Restart the app once after pulling to pick both up. |
 | Stats "Saved" doesn't match the files on disk | Completed jobs now reconcile `done`/`total` to the real `st_size` after the final rename; in-progress jobs intentionally show transfer bytes, and time-based (simulated) jobs never count into "Saved". |
 | Few web results | Web engines now page: Bing RSS `first=` up to 4 pages, Google up to 4 `start=` pages on the fingerprinted path, Mojeek 3 pages; default `result_limit` raised 60→100. Engines you unchecked in Settings stay unchecked — the strip shows what actually ran. |
+| Video/torrent search returned unrelated web pages | The dorked-web source inside the video (and software) verticals is now **hard-gated**: a result only survives if its URL ends in a real media/program extension or is a playable watch-page. Bing's RSS endpoint happily ignores `filetype:` — that is where LinkedIn/profile spam used to leak from. |
+| Quality choice ignored (everything was 640×480) | YouTube caps the *format map* it shows anonymous `web`-client requests. The analyzer now queries the `android`/`tv` clients first and **merges whichever answer is richer**, and downloads lead with the mobile client too — the picker's 1080p/2160p entries now actually exist. If a video still downloads at 480p, set **Settings → Media → Browser cookies source** (uses your logged-in browser session — the definitive fix). |
+| No FFmpeg on the machine | The launcher **downloads and verifies** official FFmpeg builds (gyan.dev on Windows, BtbN on Linux) into the app's own `bin/` on first run — nothing to install by hand. Opt out with `WEBFINDER_NO_FFMPEG_INSTALL=1`; macOS gets a `brew install ffmpeg` hint instead. The HLS worker also retries once per job via the same auto-heal. |
+| Stats "Saved" tile showed literal `<i> MB</i>` | That HTML lived in a `textContent` sink; the formatter now emits plain text. |
 | Copy button "does nothing" on media cards | Fixed: handlers now capture `e.currentTarget` before `await` (the DOM nulls it after dispatch). |
 | Dragging the titlebar didn't move the window / maximize never restored | Fixed: header carries pywebview's `.pywebview-drag-region` selector (CSS `-webkit-app-region` is a no-op in WebView2) and the bridge reads the LIVE native `WindowState` instead of pywebview's static `maximized` flag. Double-click the titlebar toggles maximize too. |
 | Proxy env vars make the app ignore its own localhost | All self-probes (`run.py`, desktop launcher) now bypass the system proxy (`ProxyHandler({{})}`). |

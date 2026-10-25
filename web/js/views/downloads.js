@@ -126,7 +126,7 @@
     animateNumber($("#st-done"), done);
     const speed = S.totalSpeed();
     $("#st-speed").innerHTML = `${fmtBytes(speed, 1)}<i>/s</i>`;
-    animateNumber($("#st-saved"), S.totalSaved(), (v) => `${fmtBytes(v).split(" ")[0]} <i>${fmtBytes(v).split(" ")[1]}</i>`);
+    animateNumber($("#st-saved"), S.totalSaved(), (v) => fmtBytes(v));  // textContent sink — no HTML here (that showed a literal <i>)
     $("#dl-subtitle").textContent = active
       ? `${active} in the pipe — controls live on each row; every transfer also keeps its source link one click away.`
       : (S.jobs.size ? "Idle. Retry or clear finished transfers to tidy the list." : "Nothing in flight — start something from Search or Direct Link.");

@@ -285,3 +285,37 @@
   border: 1px solid var(--panel-border-hi); border-bottom-width: 2px; background: var(--panel-strong); color: var(--text-2); }
 .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 0 var(--accent-glow); animation: ping 1.6s cubic-bezier(0, 0, 0.2, 1) infinite; }
 @keyframes ping { 70% { box-shadow: 0 0 0 12px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+
+/* ── about sheet ──────────────────────────────────────────────────────────── */
+.modal:has(.about-hero) { width: min(680px, calc(100vw - 48px)); }
+.about-hero { display: flex; gap: 14px; align-items: center; padding: 16px; border-radius: 16px;
+  background: radial-gradient(140% 180% at 0 0, rgba(139,92,246,.30), transparent 55%),
+              radial-gradient(140% 180% at 100% 10%, rgba(34,211,238,.16), transparent 50%), var(--panel); }
+.about-hero .ah-ico { width: 54px; height: 54px; border-radius: 15px; flex: none; color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #7c5dfa, #22d3ee); box-shadow: 0 10px 28px rgba(124,93,250,.38); }
+.about-hero .ah-ico svg { width: 27px; height: 27px; }
+.about-hero h2 { margin: 0; font-size: 20px; letter-spacing: .2px; }
+.about-hero h2 i { font-style: normal; font-size: 10.5px; color: var(--text-3); margin-left: 8px;
+  background: var(--panel-strong); padding: 2px 8px; border-radius: 99px; border: 1px solid var(--panel-border); vertical-align: 2px; }
+.about-hero p { margin: 5px 0 0; color: var(--text-2); font-size: 12.5px; line-height: 1.55; max-width: 46ch; }
+.about-feats { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; margin-top: 12px; }
+.about-feat { display: flex; gap: 10px; padding: 11px 12px; border: 1px solid var(--panel-border);
+  border-radius: 13px; background: var(--panel); transition: border-color var(--t-med); }
+.about-feat:hover { border-color: var(--panel-border-hi); }
+.about-feat .af-ico { flex: none; width: 30px; height: 30px; border-radius: 9px; color: #a78bfa;
+  background: rgba(139,92,246,.13); display: flex; align-items: center; justify-content: center; }
+.about-feat .af-ico svg { width: 15px; height: 15px; }
+.about-feat b { font-size: 12.5px; }
+.about-feat p { margin: 3px 0 0; font-size: 11.5px; line-height: 1.5; color: var(--text-2); }
+.about-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.about-chip { font-size: 11px; padding: 3px 11px; border-radius: 99px; color: var(--text-2);
+  border: 1px solid var(--panel-border); background: var(--panel); }
+.about-author { display: flex; align-items: center; gap: 12px; margin-top: 12px; padding: 12px 14px;
+  border-radius: 14px; border: 1px solid var(--panel-border); background: var(--panel); }
+.about-author .aa-ava { width: 40px; height: 40px; border-radius: 50%; flex: none; font-weight: 700; font-size: 13.5px;
+  background: linear-gradient(135deg, #f472b6, #7c5dfa); color: #fff; display: flex; align-items: center; justify-content: center; }
+.about-author b { font-size: 13.5px; }
+.about-author p { margin: 2px 0 0; font-size: 11.5px; color: var(--text-2); }
+.rail-min #btn-about span { display: none; }
+@media (max-width: 640px) { .about-feats { grid-template-columns: 1fr; } }

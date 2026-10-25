@@ -17,15 +17,16 @@ APIBAY = json.dumps([
 ])
 
 class Resp:
-    def __init__(self, text, status=200):
+    def __init__(self, text, status=200, headers=None):
         self.text, self.status_code = text, status
+        self.headers = headers or {"content-type": "application/json"}
     def json(self): return json.loads(self.text)
     def raise_for_status(self):
         if self.status_code >= 400: raise RuntimeError(f"HTTP {self.status_code}")
 
 class FakeClient:
     def __init__(self, routes): self.routes, self.calls = routes, []
-    async def get(self, url, params=None, headers=None):
+    async def get(self, url, params=None, headers=None, cookies=None):
         self.calls.append(url)
         for frag, resp in self.routes.items():
             if frag in url: return resp
@@ -139,3 +140,112 @@ assert seeds_seq == sorted(seeds_seq, reverse=True), seeds_seq
 print("✓ search_torrents: merged", len(out["results"]), "across sources, min-seeds gate + health sort ok")
 
 print("\nALL VERTICAL FIXTURE TESTS PASSED")
+
+
+# ── YouTube videoRenderer fixture (video vertical) ─────────────────────────
+YT_DATA = {"items": [{"sectionListRenderer": {"contents": [{"itemSectionRenderer": {"contents": [
+    {"videoRenderer": {
+        "videoId": "abc123",
+        "title": {"runs": [{"text": "Hayedeh \u2013 Sobh e Delan (Live 1981)"}]},
+        "lengthText": {"simpleText": "4:12"},
+        "ownerText": {"runs": [{"text": "Rhythm of 60s"}]},
+        "viewCountText": {"simpleText": "12,345,678 views"},
+        "publishedTimeText": {"simpleText": "3 years ago"},
+        "thumbnail": {"thumbnails": [{"url": "https://i.ytimg.com/vi/abc123/hq1.jpg"},
+                                      {"url": "https://i.ytimg.com/vi/abc123/maxresdefault.jpg"}]},
+    }},
+    {"videoRenderer": {"videoId": "def456", "title": {"runs": [{"text": "short"}]}},
+    }
+]}}]}}]}
+YT_HTML = '<html><body><script>var ytInitialData = ' + json.dumps(YT_DATA) + ';</script></body></html>'
+rows = asyncio.run(v._youtube_videos(FakeClient({"youtube.com/results": Resp(YT_HTML, headers={"content-type": "text/html"})}), "hayedeh", 20, False))
+assert len(rows) == 2, rows
+r0 = rows[0]
+assert r0["url"] == "https://www.youtube.com/watch?v=abc123"
+assert r0["duration"] == 252, r0["duration"]                       # 4:12 → seconds
+assert r0["thumb"].endswith("maxresdefault.jpg")                   # best thumbnail wins
+assert r0["publisher"] == "Rhythm of 60s"
+assert "views" in r0["snippet"]
+print("✓ youtube source: videoRenderer walk, duration, maxres thumb, channel")
+
+# ── Torlock fixture ─────────────────────────────────────────────────────────
+TORLOCK = """<html><table>
+<tr><td class="td6left"><a href="https://www.torlock.com/software/torrent/5047081/Windows-11-22H2.html">Windows 11 22H2 x64 Multilingual</a></td>
+<td class="c1s">142</td><td class="c7s">3.5 GB</td>
+<td><a href="magnet:?xt=urn:btih:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA">magnet</a></td></tr>
+<tr><td class="td6left"><a href="/games/torrent/5047082/Old.Game.Edition.html">Old Game Edition</a></td>
+<td class="c1s">7</td><td class="c7s">700 MB</td></tr>
+</table></html>"""
+rows = asyncio.run(v._torlock(FakeClient({"torlock.com": Resp(TORLOCK, headers={"content-type": "text/html"})}), "windows 11", 20))
+assert len(rows) == 2, rows
+assert rows[0]["url"].startswith("magnet:?xt=urn:btih:AAAA")           # magnet when present
+assert rows[0]["seeders"] == 142 and rows[0]["size_bytes"] == int(3.5 * 1024**3)
+assert rows[1]["url"].endswith("/download/5047082.torrent")             # .torrent file otherwise
+assert rows[0]["torrent_url"].endswith("/download/5047081.torrent")
+print("✓ torlock parser: magnet-first, .torrent fallback, seeds+size ok")
+
+# ── Open Library (resolves IA ids to direct files) ─────────────────────────
+OL = json.dumps({"docs": [
+    {"key": "/works/OL1W", "title": "The C# Player's Guide", "author_name": ["RB Whitaker"],
+     "first_publish_year": 2020, "cover_i": 123456, "ia": ["csharp_guide_2020"], "ebook_access": "borrowable"},
+    {"key": "/works/OL2W", "title": "Metadata only book", "ia": [], "ebook_access": "none"},
+]})
+IAM = json.dumps({"server": "ia800000.us.archive.org", "dir": "/0/items/csharp_guide_2020",
+                  "files": [{"name": "TheGuide_djvu.txt", "size": "90000"},
+                            {"name": "TheGuide.pdf", "size": "8000000"},
+                            {"name": "TheGuide.epub", "size": "2000000"}]})
+rows = asyncio.run(v._openlibrary(FakeClient({"openlibrary.org/search.json": Resp(OL),
+                                              "archive.org/metadata": Resp(IAM)}), "C#", 20))
+assert len(rows) == 1, rows                                  # metadata-only rows skipped
+r0 = rows[0]
+assert r0["url"] == "https://ia800000.us.archive.org/download/csharp_guide_2020/TheGuide.epub"
+assert r0["size_bytes"] == 2000000 and r0["engine"] == "openlibrary"
+assert "covers.openlibrary.org" in r0["thumb"] and r0["publisher"] == "RB Whitaker"
+print("✓ openlibrary: IA-direct EPUB preferred over PDF, cover + author mapped")
+
+# ── Standard Ebooks OPDS ─────────────────────────────────────────────────────
+SE = """<feed xmlns="http://www.w3.org/2005/Atom">
+<entry><title>The Great Gatsby — F. Scott Fitzgerald</title>
+<id>https://standardebooks.org/ebooks/f-scott-fitzgerald/the-great-gatsby</id>
+<author><name>F. Scott Fitzgerald</name></author>
+<link href="/ebooks/f-scott-fitzgerald/the-great-gatsby/downloads/epub" type="application/epub+zip"/>
+<link href="/url/cover.jpg" type="image/jpeg"/></entry>
+<entry><title>No links here</title><id>x</id></entry>
+</feed>"""
+rows = asyncio.run(v._standardebooks(FakeClient({"standardebooks.org": Resp(SE, headers={"content-type": "application/atom+xml"})}), "gatsby", 20))
+assert len(rows) == 1, rows
+assert rows[0]["url"] == "https://standardebooks.org/ebooks/f-scott-fitzgerald/the-great-gatsby/downloads/epub"
+assert rows[0]["file_type"] == "epub" and rows[0]["is_direct"] is True
+print("✓ standard ebooks: OPDS entries → direct epub URLs, linkless entries skipped")
+
+# ── F-Droid JSON API ─────────────────────────────────────────────────────────
+FD = json.dumps({"count": 1, "packages": [{
+    "packageName": "org.thunderdog.challegram", "name": "Telegram X", "summary": "An unofficial Telegram.",
+    "versions": [{"versionCode": 100, "versionName": "0.26.1", "apk": "https://f-droid.org/repo/org.thunderdog.challegram_100.apk"},
+                 {"versionCode": 110, "versionName": "0.27.0", "apk": "https://f-droid.org/repo/org.thunderdog.challegram_110.apk"}]}]})
+rows = asyncio.run(v._fdroid(FakeClient({"search.f-droid.org": Resp(FD)}), "telegram", 20))
+assert len(rows) == 1 and rows[0]["url"].endswith("_110.apk")     # newest versionCode wins
+assert rows[0]["file_type"] == "apk" and rows[0]["publisher"] == "org.thunderdog.challegram"
+print("✓ f-droid: latest version picked, direct APK url")
+
+# ── GitHub Releases ──────────────────────────────────────────────────────────
+GH_Q = json.dumps({"items": [{"full_name": "winamp-classic/winamp", "html_url": "https://github.com/winamp-classic/winamp",
+                              "owner": {"avatar_url": "https://avatars.githubusercontent.com/u/1.png"}}]})
+GH_R = json.dumps({"tag_name": "v3.7", "body": "Final release.",
+                   "assets": [{"name": "WinampSetup.exe", "size": 30000000, "download_count": 9999,
+                               "browser_download_url": "https://github.com/winamp-classic/winamp/releases/download/v3.7/WinampSetup.exe"},
+                              {"name": "src.tar.gz", "size": 1, "browser_download_url": "https://github.com/x/y/releases/download/v1/src.tar.gz"}]})
+rows = asyncio.run(v._github_releases(FakeClient({"search/repositories": Resp(GH_Q), "releases/latest": Resp(GH_R)}), "winamp", 20))
+assert len(rows) == 1, rows                                        # tar.gz source filtered out
+assert rows[0]["url"].endswith("WinampSetup.exe") and rows[0]["file_type"] == "exe"
+assert rows[0]["size_bytes"] == 30000000 and rows[0]["is_direct"] is True
+print("✓ github: real installer assets only, size + direct url ok")
+
+# ── gate regexes: the two leaks from the field report ───────────────────────
+assert v._archive_relevant({"url": "https://mirror.example/winamp/winamp5666_full_all.zip", "title": "Index of /winamp", "snippet": ""})
+assert not v._archive_relevant({"url": "https://linkedin.com/in/robert-dodoo", "title": "Robert Dodoo – LinkedIn", "snippet": "Accessioner profile"})
+assert v._FILE_EXT_RX["video"].search("https://files.example.org/a/b/clip.MP4")
+assert not v._FILE_EXT_RX["video"].search("https://dictionary.example.org/langdict/hide")
+assert v._PLAYABLE_HOST_RX.search("https://www.youtube.com/watch?v=abc123")
+assert v._FILE_EXT_RX["app"].search("https://github.com/o/r/releases/download/v/Tool-setup.exe")
+print("✓ gates: archive + video + app extension regexes behave (LinkedIn-style junk never passes)")

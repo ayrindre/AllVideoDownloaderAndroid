@@ -140,12 +140,14 @@ VERTICAL_ROUTES: dict[str, tuple[str, str, object]] = {
     "torrent": ("torrents", "torrents", None),
     "ebook":   ("ebooks",   "ebooks",   None),
     "archive": ("archives", "archives", None),
+    "software":  ("software", "software", None),
 }
 VERTICAL_ROUTES["image"] = VERTICAL_ROUTES["image"][:2] + (verticals.search_images,)
 VERTICAL_ROUTES["video"] = VERTICAL_ROUTES["video"][:2] + (verticals.search_videos,)
 VERTICAL_ROUTES["torrent"] = VERTICAL_ROUTES["torrent"][:2] + (verticals.search_torrents,)
 VERTICAL_ROUTES["ebook"] = VERTICAL_ROUTES["ebook"][:2] + (verticals.search_ebooks,)
 VERTICAL_ROUTES["archive"] = VERTICAL_ROUTES["archive"][:2] + (verticals.search_archives,)
+VERTICAL_ROUTES["software"] = VERTICAL_ROUTES["software"][:2] + (verticals.search_software,)
 
 
 @router.post("/search")
@@ -161,7 +163,7 @@ async def search(body: SearchRequest):
     if cfg["demo_mode"]:
         _demo_map = {"image": media.demo_image_results, "video": media.demo_video_results,
                      "torrent": media.demo_torrent_results, "ebook": media.demo_ebook_results,
-                     "archive": media.demo_archive_results}
+                     "archive": media.demo_archive_results, "software": media.demo_software_results}
         if len(body.types) == 1 and body.types[0] in _demo_map:
             data = _demo_map[body.types[0]](body.query, limit)
         else:

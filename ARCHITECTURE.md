@@ -121,6 +121,12 @@ the UI renders an honest blocked panel — **never** a dorked web-search fallbac
 irrelevant pages are worse than an explained empty state. The Settings `proxy` applies to the
 vertical client too.
 
+Each vertical fails **soft per source** (`_source_of`), the API surfaces `engines[]` +
+`vertical_blocked`, and dorked-web sources pass `_dork_files_fallback` extension gates.
+The software vertical (GitHub `search/repositories` → `releases/latest` assets, F-Droid
+`search.f-droid.org/?format=json`) returns installer files; `ffmpeg_setup.ensure_ffmpeg()`
+(one-shot, env-opt-out) fetches verified builds into repo-local `bin/`.
+
 ### Desktop bridge contract (`desktop/window.py`)
 pywebview recursively scans **every public attribute** of the `js_api` object
 (`webview/util.py::get_functions`) to build `window.pywebview.api`. Storing the
