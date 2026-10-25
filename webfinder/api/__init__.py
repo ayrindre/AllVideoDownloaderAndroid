@@ -64,7 +64,7 @@ class GalleryDownloadRequest(BaseModel):
 @router.get("/meta")
 async def meta():
     ff = find_ffmpeg()
-    from ..core import gallery, net, sites, ytcli
+    from ..core import cookies as cookie_state, gallery, net, sites, ytcli
     engine = ytcli.detect()
     gal = gallery.detect()
     ytdlp_version = engine["cli_version"] if engine["use_cli"] else (engine["module_version"] or None)
@@ -80,6 +80,7 @@ async def meta():
             "desktop": bool(os.environ.get("WEBFINDER_DESKTOP")),
             "gallery_dl": {"available": gal["available"], "version": gal["version"],
                            "exe": gal["exe"], "install_hint": gal["install_hint"]},
+            "cookies": cookie_state.source(),
             "tls_impersonation": net.has_impersonation(),
             "sites": {"recipes": len(sites.RECIPES)},
         },
@@ -98,8 +99,28 @@ async def put_settings(body: SettingsPatch):
     allowed = set(settings.snapshot().keys())
     patch = {k: v for k, v in body.patch.items() if k in allowed}
     merged = settings.update(patch)
+    if {"ytdlp_browser_cookies", "cookies_file"} & set(patch):
+        # the user just changed the cookie source — forget the old failure so the
+        # new one is actually tried instead of being skipped for the session
+        from ..core import cookies as cookie_state
+        cookie_state.reset()
     manager._sem = asyncio.Semaphore(max(1, int(merged.get("max_concurrent", 3))))
     return merged
+
+
+@router.get("/cookies/status")
+async def cookies_status():
+    """Which cookie source is in effect, and whether it already failed."""
+    from ..core import cookies as cookie_state
+    return cookie_state.source()
+
+
+@router.get("/cookies/probe")
+async def cookies_probe():
+    """Read the configured cookie source locally (no network) and report back."""
+    import asyncio
+    from ..core import cookies as cookie_state
+    return await asyncio.to_thread(cookie_state.probe)
 
 
 @router.post("/system/open-path")

@@ -21,6 +21,7 @@ import subprocess
 from functools import lru_cache
 
 from ..config import settings
+from . import cookies as cookie_state
 
 _ERR_MARKERS = re.compile(r"could not copy|cookie database|browser cookies", re.I)
 # "the site refused us as a non-browser" — the case TLS impersonation fixes
@@ -91,8 +92,13 @@ def use_cli() -> bool:
 
 
 def _cookie_flags() -> list[str]:
-    b = (settings.get("ytdlp_browser_cookies") or "").strip()
-    return ["--cookies-from-browser", b] if b else []
+    """--cookies <file> when one is configured, else the browser source.
+
+    A browser source that already failed in this session is skipped on purpose:
+    the DB stays unreadable, so retrying only costs seconds and prints the same
+    ERROR line again for every request.
+    """
+    return cookie_state.ytdlp_flags()
 
 
 @lru_cache(maxsize=1)
@@ -171,10 +177,15 @@ def extract(url: str, *, flat: bool = False, playlist_items: str | None = None,
                 return json.loads(r.stdout), ""
             except json.JSONDecodeError:
                 return None, "yt-dlp CLI emitted non-JSON output"
-        err = (r.stderr or "").strip().splitlines()
+        err_full = (r.stderr or "").strip()
+        err = (err_full or "").splitlines()
         err = friendly(err[-1])[:260] if err else f"yt-dlp CLI exited {r.returncode}"
+        if (attempt == 0 and cookies and _ERR_MARKERS.search(err)) or cookie_state.is_cookie_error(err):
+            cookie_state.mark_browser_failure(err_full or err)
         if attempt == 0 and cookies and _ERR_MARKERS.search(err):
             continue                       # retry once, without cookie reading
+        if cookie_state.is_cookie_error(err):
+            return None, f"{err} · {cookie_state.EXPLAIN}"
         return None, err
     return None, "unreachable"
 

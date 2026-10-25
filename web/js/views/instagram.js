@@ -28,6 +28,7 @@
   let selected = new Set();
   let cardNodes = new Map();  // item id → DOM node (selection updates in place)
   let filter = "all";         // all | video | image
+  let cookieSig = "";         // last cookie-source state shown in the scan bar
 
   /* ── init ──────────────────────────────────────────────────────────────── */
   async function init() {
@@ -112,6 +113,25 @@
     }
     sel.addEventListener("change", () => { limit = Number(sel.value); savePrefs(); });
     row.append(sel);
+    row.append(sessionChip());
+  }
+
+  /* Instagram shows almost nothing to a logged-out client, so the state of the
+   * cookie source belongs on screen — not only in the error that follows. */
+  function sessionChip() {
+    const c = S.meta?.system?.cookies || {};
+    const mode = c.mode || (S.settings?.cookies_file ? "file" : (S.settings?.ytdlp_browser_cookies ? "browser" : ""));
+    const failed = !!c.browser_failed;
+    const label = failed ? "cookies unreadable"
+      : mode === "file" ? `${String(c.file || "").split(/[\\/]/).pop() || "cookies.txt"}`
+      : mode === "browser" ? `${c.browser || S.settings?.ytdlp_browser_cookies} session`
+      : "logged out";
+    const cls = failed ? "err" : mode ? "ok" : "muted";
+    const title = failed ? "The browser's cookie database could not be read — click to check."
+      : mode ? "Cookie source used for scans"
+      : "No cookie source: Instagram hides most profiles, stories and 18+ content from logged-out requests. Click to check.";
+    return el("button", { class: `ig-session ${cls}`, type: "button", title, onclick: checkCookies },
+      el("i", { class: "dot" }), label);
   }
 
   const savePrefs = window.UI.debounce((() => {
@@ -200,8 +220,43 @@
       el("div", { class: "ig-hint" }, "Instagram rate-limits page fetches (a few seconds each), so a full scan can take a minute. Results appear as each tab finishes.")));
   }
 
+  /* A scan that worked, but not the way the user asked (e.g. it ran logged out
+   * because the browser's cookie DB was unreadable) — say so, with the fix. */
+  function warnCard(warnings) {
+    return el("div", { class: "ig-warn" },
+      el("span", { html: ICONS.svg("warning") }),
+      el("div", {},
+        ...warnings.slice(0, 2).map((w) => el("div", {}, w)),
+        el("div", { class: "ig-warn-actions" },
+          el("button", { class: "btn btn-ghost btn-sm", onclick: checkCookies }, "Check cookies"),
+          el("button", { class: "btn btn-ghost btn-sm", onclick: () => window.App.showView("view-settings") }, "Open settings"))));
+  }
+
+  async function checkCookies() {
+    try {
+      const r = await window.API.cookiesProbe();
+      toast(r.message, r.ok ? "ok" : "warn", { icon: r.ok ? "check" : "warning", ttl: r.ok ? 5000 : 14000 });
+      try {
+        const meta = await window.API.meta();
+        S.meta = meta;
+        renderOptions();
+      } catch { /* the toast already told the story */ }
+    } catch (e) {
+      toast(String(e?.message || e), "err");
+    }
+  }
+
   function render(snap) {
     if (!snap) return;
+    /* the scan tells us what the cookie source did — keep the pill honest */
+    if (snap.cookies) {
+      const sig = `${snap.cookies.mode}|${snap.cookies.browser_failed}|${snap.cookies.file}`;
+      if (sig !== cookieSig) {
+        cookieSig = sig;
+        S.meta = { ...(S.meta || {}), system: { ...(S.meta?.system || {}), cookies: snap.cookies } };
+        renderOptions();
+      }
+    }
     const s = stage();
     const running = ["queued", "scanning"].includes(snap.status);
     const items = snap.items || [];
@@ -237,11 +292,11 @@
     head.append(tabs);
 
     if (snap.errors?.length) {
-      const errs = el("div", { class: "notice warn", style: { marginTop: "12px" } },
+      head.append(el("div", { class: "notice warn" },
         el("span", { html: ICONS.svg("warning") }),
-        el("div", {}, ...snap.errors.slice(0, 3).map((e) => el("div", {}, e))));
-      head.append(errs);
+        el("div", {}, ...snap.errors.slice(0, 3).map((e) => el("div", {}, e)))));
     }
+    if (snap.warnings?.length) head.append(warnCard(snap.warnings));
     s.append(head);
 
     if (!items.length) {
@@ -249,7 +304,11 @@
         s.append(el("div", { class: "card ig-empty" },
           el("b", {}, "No media came back."),
           el("p", {}, "Instagram hides most of a profile from logged-out visitors, and private accounts return nothing at all. ",
-            "Set Settings → Video & capture → ", el("b", {}, "Browser cookies source"), " to the browser you are logged into Instagram with, close that browser completely, then scan again.")));
+            "Set Settings → Video & capture → ", el("b", {}, "Browser cookies source"), " to the browser you are logged into Instagram with, close that browser completely, then scan again.",
+            " If Chrome keeps answering “Could not copy Chrome cookie database”, export a cookies.txt instead (Settings → ", el("b", {}, "Cookies file"), ") — that source always reads."),
+          el("div", { class: "ig-warn-actions", style: { marginTop: "4px" } },
+            el("button", { class: "btn btn-ghost btn-sm", onclick: checkCookies }, "Check my cookies"),
+            el("button", { class: "btn btn-ghost btn-sm", onclick: () => window.App.showView("view-settings") }, "Open settings"))));
       }
       return;
     }

@@ -142,7 +142,7 @@
 .dl-status { flex: none; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px;
   padding: 3px 8px; border-radius: 6px; }
 .st-downloading { color: var(--accent); background: var(--accent-soft); }
-.st-downloading .dl-status::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px;
+.dl-status.st-downloading::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px;
   border-radius: 50%; background: currentColor; animation: ping 1.4s infinite; }
 .st-queued { color: var(--text-3); background: var(--panel-strong); }
 .st-paused { color: var(--warn); background: rgba(251,191,36,.1); }
@@ -162,7 +162,10 @@
   transform: translateX(-100%); animation: dl-sheen 1.8s var(--ease) infinite; }
 .dl-row.is-done .dl-sheen, .dl-row.is-paused .dl-sheen, .dl-row.is-error .dl-sheen { animation: none; opacity: 0; }
 @keyframes dl-sheen { to { transform: translateX(220%); } }
-.dl-line2 { display: flex; gap: 16px; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.dl-line2 { display: flex; gap: 16px; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums;
+  align-items: center; }
+.dl-line2 svg { width: 12px; height: 12px; opacity: .85; vertical-align: -2px; }
+.dl-speed, .dl-eta { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .dl-line2 b { color: var(--text-2); font-weight: 600; }
 .dl-speed { color: var(--info); }
 .dl-actions { display: flex; gap: 4px; opacity: .55; transition: opacity var(--t-fast); }
@@ -296,6 +299,18 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 /* ── Instagram checker (gallery-dl profile walk) ───────────────────────────── */
 .ig-options { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-top: 12px; }
 .ig-limit { width: auto; min-width: 118px; height: 32px; padding: 0 10px; font-size: 12px; }
+/* cookie-source pill: "logged out" is the usual reason a profile looks empty */
+.ig-session { margin-left: auto; display: inline-flex; align-items: center; gap: 7px; height: 32px;
+  padding: 0 12px; border-radius: 99px; font-size: 11.5px; font-weight: 600; cursor: pointer;
+  background: var(--panel); border: 1px solid var(--panel-border); color: var(--text-2);
+  transition: all var(--t-fast) var(--ease); }
+.ig-session:hover { border-color: var(--panel-border-hi); color: var(--text); }
+.ig-session .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); }
+.ig-session.ok { border-color: rgba(52,211,153,.34); color: #b9f4d9; }
+.ig-session.ok .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+.ig-session.err { border-color: rgba(251,113,133,.38); color: #ffc9d4; }
+.ig-session.err .dot { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+.ig-session.muted { opacity: .9; }
 .ig-stage { margin-top: 22px; display: flex; flex-direction: column; gap: 14px; }
 .ig-idle { text-align: center; padding: 46px 26px; display: flex; flex-direction: column;
   align-items: center; gap: 10px; }
@@ -307,14 +322,22 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 .ig-idle p { font-size: 13px; color: var(--text-2); line-height: 1.65; max-width: 62ch; }
 .ig-idle .ig-hint { font-size: 12px; color: var(--text-3); }
 
-.ig-progress { display: flex; flex-direction: column; gap: 12px; }
+.ig-progress { display: flex; flex-direction: column; gap: 12px; padding: 18px 20px; }
 .ig-prog-head { display: flex; gap: 14px; align-items: center; }
 .ig-prog-head b { font-size: 14.5px; }
 .ig-prog-head p { font-size: 12px; color: var(--text-3); margin-top: 3px; overflow-wrap: anywhere; }
 .ig-hint { font-size: 11.5px; color: var(--text-3); line-height: 1.6; }
 
-.ig-head { display: flex; flex-direction: column; gap: 14px; }
-.ig-head-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
+.ig-head { display: flex; flex-direction: column; gap: 14px; padding: 18px 20px; }
+.ig-head-row { display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+  justify-content: space-between; }
+.ig-head .notice { margin: 0; }
+.ig-warn { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 13px;
+  background: rgba(251,191,36,.08); border: 1px solid rgba(251,191,36,.28);
+  font-size: 12px; color: #ffe6b0; line-height: 1.55; }
+.ig-warn svg { width: 15px; height: 15px; flex: none; margin-top: 1px; color: var(--warn); }
+.ig-warn b { color: #fff; }
+.ig-warn-actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
 .ig-title { display: flex; gap: 13px; align-items: center; min-width: 0; flex: 1; }
 .ig-ava { width: 44px; height: 44px; flex: none; border-radius: 50%; display: grid; place-items: center;
   background: linear-gradient(140deg, #833ab4, #e1306c 55%, #fcaf45); }
@@ -381,7 +404,7 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   padding: 4px 8px; border-radius: 7px; color: #fff; background: rgba(8,8,12,.8);
   border: 1px solid rgba(255,255,255,.12); backdrop-filter: blur(8px); }
 .ig-mini:hover { background: var(--accent-soft); border-color: color-mix(in srgb, var(--accent) 55%, transparent); }
-.ig-empty { display: flex; flex-direction: column; gap: 8px; }
+.ig-empty { display: flex; flex-direction: column; gap: 8px; padding: 18px 20px; }
 .ig-empty b { font-size: 14px; }
 .ig-empty p { font-size: 12.5px; color: var(--text-2); line-height: 1.65; max-width: 70ch; }
 @media (max-width: 720px) {

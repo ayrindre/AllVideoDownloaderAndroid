@@ -368,6 +368,8 @@ from pathlib import Path as _P
 from webfinder.core.downloader import DownloadManager, DownloadJob as _J
 tmp = _P(tempfile.mkdtemp())
 _st.update({"ytdlp_browser_cookies": "chrome"})
+from webfinder.core import cookies as _CK
+_CK.reset()                       # the failure memo is session-wide, by design
 class DL_YDL:
     stats = {"with": 0, "without": 0}
     def __init__(self, opts): self.opts = opts
@@ -391,6 +393,7 @@ mm._ytdlp_thread(jj)                             # must NOT raise
 assert (tmp / "vid.mp4").exists()
 assert DL_YDL.stats["without"] >= 1 and DL_YDL.stats["with"] >= 1, DL_YDL.stats
 _st.update({"ytdlp_browser_cookies": _orig_st})
+_CK.reset()
 print("✓ download path: cookie wall → anonymous rerun → file settled (screenshot bug fixed)")
 
 

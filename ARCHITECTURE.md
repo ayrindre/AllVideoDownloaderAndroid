@@ -67,6 +67,35 @@ optional extraction patterns), `net` supplies browser-grade requests and the
 `curl_cffi` TLS-impersonation fallback. Adding a site never touches the
 analyzer; `GET /api/sites` and `tools/recipe_probe.py` expose the registry.
 
+## Cookies — `core/cookies.py` (one policy, four call sites)
+
+Every engine used to reach into `settings["ytdlp_browser_cookies"]` on its own.
+That produced the worst failure mode in the app: Chrome keeps its cookie DB
+locked (and 127+ App-Bound-encrypts it), so *every* request that asked for
+cookies failed the same way, twice (original + anonymous retry), printing
+`ERROR: Could not copy Chrome cookie database` once per attempt.
+
+One module now answers "which cookies?" for `media.py` (yt-dlp module),
+`ytcli.py` (system yt-dlp CLI), `downloader.py` (the job worker) and
+`gallery.py` (gallery-dl):
+
+```
+settings.cookies_file ──(exists, has rows)──► --cookies <file>   (always wins)
+settings.ytdlp_browser_cookies ──► --cookies-from-browser <b>    (unless it failed)
+neither / failed ──► no flags (anonymous)
+```
+
+- `mark_browser_failure(msg)` remembers the first unreadable-DB error for the
+  process, so later requests skip the read instead of paying its timeout again;
+  changing the setting in Settings (`PUT /api/settings`) or a successful
+  `probe()` clears the memo.
+- `strip_flags(argv)` is the anonymous retry path (drops every cookie flag and
+  its value, keeps the URL).
+- `probe()` reads the source **locally** (Netscape file parser, or yt-dlp's own
+  cookie extractor) and returns one actionable sentence. It backs
+  `GET /api/cookies/probe` — the *Check cookies* buttons in Settings and in the
+  Instagram tab, and the "cookies unreadable" pill on the scan bar.
+
 ## Instagram checker — `core/gallery.py` (+ `api`: `/api/gallery/*`)
 
 Profiles are a *walk*, not an extraction, so they use a different engine:

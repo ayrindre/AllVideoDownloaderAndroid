@@ -46,6 +46,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from ..config import settings
+from . import cookies as cookie_state
 
 # ---------------------------------------------------------------------------
 # What a profile is made of — one gallery-dl URL pattern per target
@@ -192,7 +193,7 @@ def clean_targets(requested) -> list[str]:
 # CLI plumbing
 # ---------------------------------------------------------------------------
 def build_cmd(url: str, *, cookies: str = "", proxy: str = "", limit: int = 0,
-              delay: str = "") -> list[str]:
+              delay: str = "", cookie_file: str = "") -> list[str]:
     """`gallery-dl -j` for one URL, with the app's settings folded in."""
     d = detect()
     cmd = list(d["cmd"]) + [
@@ -211,8 +212,13 @@ def build_cmd(url: str, *, cookies: str = "", proxy: str = "", limit: int = 0,
         cmd += ["--sleep-request", str(delay)]
     if proxy:
         cmd += ["--proxy", proxy]
+    # A cookies.txt file always wins: it is the only source that keeps working
+    # when the browser holds (or encrypts) its own database.
+    file_path = (cookie_file or cookie_state.cookie_file()).strip()
     browser = (cookies or "").strip()
-    if browser:
+    if file_path and os.path.isfile(file_path):
+        cmd += ["--cookies", file_path]
+    elif browser and not cookie_state.browser_failure():
         cmd += ["--cookies-from-browser", browser]
     cmd.append(url)
     return cmd
@@ -252,10 +258,21 @@ def _friendly_stderr(text: str) -> str:
     return out[:400]
 
 
+_MISSING_RE = re.compile(r"user .{0,40}could not be found|user not found|account .{0,20}not found"
+                          r"|requested user|no such user|404 not found", re.I)
+
+
 def explain_error(msg: str) -> str:
     """Turn a raw gallery-dl failure into something a user can act on."""
     text = (msg or "").strip()
     low = text.lower()
+    if cookie_state.is_cookie_error(text):
+        return f"{text} — {cookie_state.EXPLAIN}"
+    if _MISSING_RE.search(low):
+        return (f"{text} — Instagram only answers this for accounts it can see: it is the reply "
+                "for a typo/renamed handle, for a private account, and (most often) for a "
+                "logged-out request to a profile it will not serve anonymously. Set Settings → "
+                "Video & capture → Browser cookies source (or a cookies.txt file) and try again.")
     if _LOGIN_RE.search(low):
         return (text + " — Instagram needs a logged-in session: set Settings → Video & capture → "
                 "Browser cookies source (chrome/edge/firefox), close that browser fully, then scan again.")
@@ -272,9 +289,10 @@ def explain_error(msg: str) -> str:
 def run_dump(url: str, *, cookies: str = "", proxy: str = "", limit: int = 0,
              delay: str = "", timeout: int = _PER_TARGET_TIMEOUT,
              cancel: threading.Event | None = None,
-             on_proc=None) -> dict:
+             on_proc=None, cookie_file: str = "") -> dict:
     """Run one gallery-dl dump. Returns ``{items, errors, raw_error, rc}``."""
-    cmd = build_cmd(url, cookies=cookies, proxy=proxy, limit=limit, delay=delay)
+    cmd = build_cmd(url, cookies=cookies, proxy=proxy, limit=limit, delay=delay,
+                    cookie_file=cookie_file)
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                 text=True, encoding="utf-8", errors="ignore")
@@ -491,6 +509,7 @@ class ScanTask:
     status: str = "queued"                 # queued | scanning | done | error | cancelled
     items: list[dict] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)   # worked, but not as asked
     started: float = field(default_factory=time.time)
     finished: float = 0.0
     current: str = ""
@@ -521,6 +540,8 @@ class ScanTask:
                            "images": len(self.items) - videos,
                            "posts": len({i["post"] for i in self.items if i.get("post")})},
                 "errors": list(self.errors),
+                "warnings": list(self.warnings),
+                "cookies": cookie_state.source(),
                 "engine": dict(self.engine),
                 "started": self.started,
                 "finished": self.finished,
@@ -601,11 +622,46 @@ def start_scan(raw_source: str, *, include=None, limit: int = 0,
     return task.to_dict()
 
 
+def _cookie_warning() -> str:
+    """One clear line about cookies — the failure is a setup issue, not a job error."""
+    return (cookie_state.browser_failure()
+            or "Browser cookies could not be read")
+
+
+def _scan_dump(task: ScanTask, target: dict, proxy: str, delay: str) -> dict:
+    """Run one target, and if the cookie source is the reason it failed, retry it
+    anonymously so public media still appears (and say so)."""
+    file_path = cookie_state.cookie_file()
+    result = run_dump(target["url"], cookies=task.cookie_source, proxy=proxy,
+                      limit=task.limit, delay=delay, cancel=task._cancel,
+                      on_proc=lambda p: setattr(task, "_proc", p),
+                      cookie_file=file_path)
+    blob = " · ".join([result.get("raw_error") or ""] + (result.get("errors") or []))
+    if not cookie_state.is_cookie_error(blob):
+        return result
+    # remember it for the whole session: every later run goes anonymous at once
+    cookie_state.mark_browser_failure(blob)
+    task.cookie_source = ""
+    retry = run_dump(target["url"], cookies="", proxy=proxy, limit=task.limit,
+                     delay=delay, cancel=task._cancel,
+                     on_proc=lambda p: setattr(task, "_proc", p), cookie_file=file_path)
+    with task._lock:
+        warning = (f"Browser cookies could not be read ({cookie_state.EXPLAIN}) — this scan ran "
+                   "logged out, so only public media appeared.")
+        if warning not in task.warnings:
+            task.warnings.append(warning)
+    return retry
+
+
 def _run_scan(task: ScanTask) -> None:
     proxy = (settings.get("proxy") or "").strip()
     delay = str(settings.get("instagram_delay") or "")
     with task._lock:
         task.status = "scanning"
+        if cookie_state.browser_failure() and not cookie_state.file_usable():
+            task.warnings.append(
+                "Browser cookies could not be read earlier in this session, so this scan runs "
+                "logged out. " + cookie_state.EXPLAIN)
 
     seen: set[str] = set()
     for target in task.targets:
@@ -615,9 +671,7 @@ def _run_scan(task: ScanTask) -> None:
             target["status"] = "scanning"
             task.current = target["key"]
         try:
-            result = run_dump(target["url"], cookies=task.cookie_source, proxy=proxy,
-                              limit=task.limit, delay=delay, cancel=task._cancel,
-                              on_proc=lambda p: setattr(task, "_proc", p))
+            result = _scan_dump(task, target, proxy, delay)
         except Exception as exc:  # noqa: BLE001 — one target must never kill the scan
             result = {"items": [], "errors": [str(exc)[:200]], "posts": []}
         finally:

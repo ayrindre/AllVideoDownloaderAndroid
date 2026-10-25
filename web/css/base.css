@@ -54,6 +54,12 @@ html[data-accent="mint"]    { --accent:#34d399; --accent-2:#38bdf8; --accent-sof
 
 /* ── reset ───────────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* Inline icons are sized here, once. An <svg> with a viewBox but no width/height
+   resolves to the width of its container (300×150 at worst), which made the
+   download row's clock/ETA icon jump size whenever the text next to it changed.
+   Every component rule below still wins by specificity. */
+svg { width: 16px; height: 16px; flex: none; vertical-align: -2px; }
 html, body { height: 100%; }
 body {
   font-family: "Segoe UI Variable Text", "Segoe UI", Inter, system-ui, -apple-system,

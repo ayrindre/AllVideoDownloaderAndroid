@@ -94,6 +94,19 @@
         el("p", { style: { fontSize: "11.5px", color: "var(--text-3)", marginTop: 7, lineHeight: 1.5 } },
           "When YouTube answers \u201cSign in to confirm you're not a bot\u201d, All Video Downloader reads your session cookies from that browser (locally, never uploaded) so extraction and downloads work on age/region-gated content. Windows: close Chrome fully after enabling, or it holds the cookie DB. Chrome 127+ on Windows encrypts it (App-Bound) — if downloads keep dying with “Could not copy Chrome cookie database”, firefox is the reliable source, or leave it empty: the app now retries every extraction and download without cookies automatically. The same choice is handed to gallery-dl, which is what makes the Instagram checker see logged-in profiles, stories and 18+ content.")),
       el("div", { class: "field" },
+        el("label", { class: "f-label" }, "Cookies file (optional, cookies.txt)"),
+        el("div", { class: "input-row" },
+          el("input", { class: "input", placeholder: "C:\\Users\\you\\cookies.txt",
+            value: st.cookies_file || "", onchange: (e) => save({ cookies_file: e.target.value.trim() }) }),
+          el("button", { class: "btn btn-ghost btn-sm", onclick: checkCookies }, "Check cookies")),
+        el("p", { style: { fontSize: "11.5px", color: "var(--text-3)", marginTop: 7, lineHeight: 1.5 } },
+          "A Netscape-format cookies.txt is the one source that always works: Chrome keeps its own ",
+          "database locked while running and App-Bound-encrypts it on Windows (yt-dlp issue 7271), so ",
+          "“Could not copy Chrome cookie database” is a setup problem, not a site problem. Export the file ",
+          "with a “Get cookies.txt LOCALLY” style extension (log in first), point this field at it, and both ",
+          "yt-dlp and gallery-dl use it — Instagram stories/highlights and gated videos start working. ",
+          "It wins over the browser source above.")),
+      el("div", { class: "field" },
         el("label", { class: "f-label" }, "FFmpeg folder (optional)"),
         el("div", { class: "input-row" }, ffPath,
           el("button", { class: "btn btn-ghost btn-sm", onclick: async () => {
@@ -226,6 +239,20 @@
     });
     return el("label", { class: "switch-line" }, input, el("span", { class: "switch" }));
   }
+  /* Reads the configured cookie source locally (no network) and reports exactly
+   * what breaks — "Could not copy Chrome cookie database" finally has a button. */
+  async function checkCookies() {
+    toast("Reading the cookie source…", "info", { icon: "clock", ttl: 2500 });
+    try {
+      const r = await window.API.cookiesProbe();
+      toast(r.message, r.ok ? "ok" : "warn", { icon: r.ok ? "check" : "warning", ttl: r.ok ? 5000 : 15000 });
+      const meta = await window.API.meta();
+      S.meta = meta;
+    } catch (e) {
+      toast(String(e?.message || e), "err");
+    }
+  }
+
   function selectOpt(values, labels, selected, onChange) {
     const s = el("select", { class: "input" });
     for (const v of values) s.append(el("option", { value: v, ...(String(v) === String(selected) ? { selected: "" } : {}) }, labels?.[v] ?? v));

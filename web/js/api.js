@@ -34,6 +34,8 @@
     selfupdate: () => req("POST", "/api/system/selfupdate"),
 
     /* ── Instagram checker (gallery-dl) ─────────────────────────────────── */
+    cookiesStatus: () => req("GET", "/api/cookies/status"),
+    cookiesProbe: () => req("GET", "/api/cookies/probe"),
     galleryEngine: () => req("GET", "/api/gallery/engine"),
     galleryScan: (payload) => req("POST", "/api/gallery/scan", payload),
     galleryScanStatus: (id) => req("GET", `/api/gallery/scan/${id}`),

@@ -33,6 +33,7 @@ from urllib.parse import urlparse, urljoin, unquote
 import httpx
 
 from ..config import settings
+from . import cookies as cookie_state
 from . import embed, filekind as fk, net
 from . import sites as sitelib
 from .ffmpeg_tools import find_ffmpeg, probe
@@ -72,9 +73,9 @@ def base_yt_opts(extra: dict | None = None) -> dict:
     # every client pass — "the CLI works but the app doesn't" root cause.
     opts = {"quiet": True, "no_warnings": True, "noprogress": True,
             "socket_timeout": 30, "retries": 3, "nocheckcertificate": True}
-    browser = (settings.get("ytdlp_browser_cookies") or "").strip()
-    if browser:
-        opts["cookiesfrombrowser"] = (browser,)
+    # cookies.txt wins over the browser source; a browser DB that already failed
+    # in this session is not re-read (it never works twice — see core/cookies.py).
+    opts.update(cookie_state.module_opts())
     px = (settings.get("proxy") or "").strip()
     if px:
         opts["proxy"] = px
@@ -630,7 +631,9 @@ def _module_attempt(url: str, mode: dict, *, no_cookies: bool = False
         if client_extra:
             extra["extractor_args"] = {"youtube": client_extra}
         if no_cookies:
-            extra["cookiesfrombrowser"] = None      # falsy → yt-dlp skips the read
+            # falsy → yt-dlp skips the read; covers both sources
+            extra["cookiesfrombrowser"] = None
+            extra["cookiefile"] = None
         try:
             with yt_dlp.YoutubeDL(base_yt_opts(extra)) as ydl:
                 infos.append((client_extra, ydl.extract_info(url, download=False)))
@@ -709,13 +712,18 @@ def _attempt_extract(url: str, mode: dict) -> tuple[dict | None, str, dict]:
     if ytcli.use_cli():
         return _cli_attempt(url, mode)
     info, err, win = _module_attempt(url, mode)
-    if (info is None and err and ytcli._ERR_MARKERS.search(err)
-            and (settings.get("ytdlp_browser_cookies") or "").strip()):
+    # A cookie source that cannot be read is a SETUP problem, not a verdict on
+    # this URL: retry once anonymously (and remember it for the whole session so
+    # the next attempt does not pay the same timeout).
+    cookie_blocked = bool(err) and cookie_state.mark_browser_failure(err)
+    if info is None and err and (cookie_blocked or
+                                 (ytcli._ERR_MARKERS.search(err)
+                                  and (settings.get("ytdlp_browser_cookies") or "").strip())):
         info2, err2, win2 = _module_attempt(url, mode, no_cookies=True)
         if info2 is not None:
             return info2, "", win2
         if err2:   # anonymous pass saw something NEWER — surface that instead
-            return None, f"{err2} · (retried without browser cookies — still refused)", {}
+            return None, err2, {}
     return info, err, win
 
 

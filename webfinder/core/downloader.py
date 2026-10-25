@@ -409,11 +409,9 @@ class DownloadManager:
             return rc, tail
 
         def stripped(args: list[str]) -> list[str]:
-            """Drop the cookie flags (Chrome's DB may be locked/encrypted)."""
-            b = str(settings.get("ytdlp_browser_cookies") or "")
-            return [a for i, a in enumerate(args)
-                    if a != "--cookies-from-browser"
-                    and not (i and args[i - 1] == "--cookies-from-browser" and a == b)]
+            """Drop every cookie flag (a locked/encrypted DB cannot be retried)."""
+            from .cookies import strip_flags
+            return strip_flags(args)
 
         try:
             rc, tail = pump(base_args)
@@ -423,6 +421,10 @@ class DownloadManager:
                 msg = ytcli.friendly(" · ".join(tail[-3:])) or f"exit {rc}"
                 # 1) cookie DB wall → same run, anonymous
                 if ytcli._ERR_MARKERS.search(msg) and ytcli._cookie_flags():
+                    # remember the broken source: every later job skips it instead
+                    # of paying the same timeout and printing the same error again
+                    from . import cookies as cookie_state
+                    cookie_state.mark_browser_failure(msg)
                     rc2, tail2 = pump(stripped(base_args))
                     if rc2 in (0, None) or self._settle_ytdlp_file(job, parent, stem):
                         self._settle_ytdlp_file(job, parent, stem)
@@ -541,7 +543,9 @@ class DownloadManager:
                 # Chrome holds/app-bound-encrypts its cookie DB (yt-dlp #7271):
                 # NEVER let that brick a download — rerun every client pass
                 # anonymously, exactly like the analyzer learned to do.
-                anon = [{**o, "cookiesfrombrowser": None} for o in attempts]
+                from . import cookies as cookie_state
+                cookie_state.mark_browser_failure(blob)
+                anon = [{**o, "cookiesfrombrowser": None, "cookiefile": None} for o in attempts]
                 last_err = None
                 if run_pass(anon):
                     return

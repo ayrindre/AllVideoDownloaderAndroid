@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT))
 TMP = Path(tempfile.mkdtemp(prefix="avd-ig-"))
 os.environ["AVD_HOME"] = str(TMP / "home")
 
+from webfinder.config import settings
 from webfinder.core import gallery as G  # noqa: E402
 
 # ═══ stub engine: behaves like gallery-dl for the shapes we care about ══════
@@ -296,5 +297,94 @@ assert [q["kind"] for q in queued] == ["http", "http"]
 assert queued[0]["meta"]["referer"] == "https://www.instagram.com/"
 assert client.post("/api/gallery/download", json={"items": []}).status_code == 400
 print("✓ api: /gallery/{engine,scan,scans,download} wired, junk items skipped, empty → 400")
+
+# ═══ cookies: cookies.txt wins, a broken browser DB is remembered ═════════
+from webfinder.core import cookies as CK  # noqa: E402
+
+tmp = Path(tempfile.mkdtemp())
+jar = tmp / "cookies.txt"
+jar.write_text("# Netscape HTTP Cookie File\n"
+               ".instagram.com\tTRUE\t/\tTRUE\t1900000000\tsessionid\tabc\n"
+               ".youtube.com\tTRUE\t/\tTRUE\t1900000000\tSID\txyz\n", encoding="utf-8")
+empty = tmp / "empty.txt"
+empty.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+
+cfg = {"ytdlp_browser_cookies": "", "cookies_file": "", "proxy": "", "instagram_include": "posts,reels",
+       "instagram_limit": 30, "instagram_delay": ""}
+settings._data.update(cfg)
+CK.reset()
+assert CK.probe()["ok"] is False and "logged out" in CK.probe()["message"]
+
+settings._data.update({"ytdlp_browser_cookies": "chrome"})
+assert CK.ytdlp_flags() == ["--cookies-from-browser", "chrome"]
+assert CK.gallery_flags() == ["--cookies-from-browser", "chrome"]
+assert CK.module_opts() == {"cookiesfrombrowser": ("chrome",)}
+print("✓ cookies: browser source reaches yt-dlp (CLI + module) and gallery-dl")
+
+# a cookies.txt beats the browser, and a bad file is reported, not silently used
+settings._data.update({"cookies_file": str(jar)})
+assert CK.ytdlp_flags() == ["--cookies", str(jar)]
+assert CK.gallery_flags() == ["--cookies", str(jar)]
+assert CK.module_opts() == {"cookiefile": str(jar)}
+assert CK.probe()["ok"] and CK.probe()["count"] == 2
+settings._data.update({"cookies_file": str(empty)})
+assert CK.probe()["ok"] is False and "no cookie rows" in CK.probe()["message"]
+settings._data.update({"cookies_file": str(tmp / "nope.txt")})
+assert CK.probe()["ok"] is False and "not found" in CK.probe()["message"]
+settings._data.update({"cookies_file": ""})
+print("✓ cookies: cookies.txt wins over the browser, empty/missing file explained")
+
+# the Chrome wall: remembered once, then skipped — and the flag is gone
+assert CK.mark_browser_failure("ERROR: Could not copy Chrome cookie database") is True
+assert CK.browser_failure() and CK.ytdlp_flags() == [] and CK.gallery_flags() == [] and CK.module_opts() == {}
+assert "unreadable" in CK.used_source()
+CK.reset()
+assert CK.ytdlp_flags() == ["--cookies-from-browser", "chrome"]      # a new source is retried
+print("✓ cookies: one unreadable-DB failure is remembered instead of retried forever")
+
+# a scan that hits the wall retries anonymously and SAYS so
+calls = []
+real_dump = G.run_dump
+
+
+def fake_dump(url, **kw):
+    calls.append(kw.get("cookies"))
+    if len(calls) == 1:
+        return {"items": [], "errors": ["Could not copy Chrome cookie database"], "posts": [],
+                "raw_error": "ERROR: Could not copy Chrome cookie database"}
+    return {"items": [{"id": "1", "url": "https://cdn/x.jpg", "kind": "image", "ext": "jpg",
+                       "filename": "x.jpg", "post": "P", "date": 1, "username": "u"}],
+            "errors": [], "posts": [], "raw_error": ""}
+
+
+G.run_dump = fake_dump
+CK.reset()
+try:
+    snap = G.start_scan("@nasa", include=["posts"], limit=3, cookie_source="chrome")
+    for _ in range(200):
+        body = G.get_scan(snap["id"])
+        if body["status"] not in ("queued", "scanning"):
+            break
+        time.sleep(0.05)
+finally:
+    G.run_dump = real_dump
+
+assert calls == ["chrome", ""], calls            # retried logged out
+assert body["status"] == "done" and body["counts"]["total"] == 1
+assert body["warnings"] and "logged out" in body["warnings"][0]
+assert body["cookies"]["browser_failed"] is True
+print("✓ cookies: a 401/DB wall retries anonymously and warns instead of dying")
+
+# the API exposes the probe so the UI can offer a "Check cookies" button
+r = client.get("/api/cookies/status")
+assert r.status_code == 200 and "mode" in r.json()
+CK.reset()
+r = client.get("/api/cookies/probe")
+assert r.status_code == 200 and r.json()["ok"] is False
+assert "cookies" in client.get("/api/meta").json()["system"]
+print("✓ api: /cookies/{status,probe} + meta.cookies for the settings button")
+
+settings._data.update(cfg)
+CK.reset()
 
 print("\nINSTAGRAM CHECKER TESTS PASSED")

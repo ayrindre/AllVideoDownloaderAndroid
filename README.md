@@ -64,7 +64,8 @@ Details that matter in practice:
   `--post-range`, plus an optional request delay — Instagram logs out clients that
   hammer it, and `stories`/`highlights`/18+ content always need the session.
 - **Same cookie source as yt-dlp.** Settings → Video & capture → *Browser cookies
-  source* is handed to `--cookies-from-browser`, which is the difference between
+  source* (or a `cookies.txt` file, which wins) is handed to
+  `--cookies-from-browser` / `--cookies`, which is the difference between
   "nothing found" and a full profile.
 - **Honest failures.** A 401 becomes "set the cookie source", a DNS/proxy failure
   says so, and a gallery-dl traceback is trimmed to one readable line with the fix
@@ -154,7 +155,13 @@ Two causes, both handled structurally now:
    whole client ladder anonymously **on both paths** (analyzer and downloader,
    module and system-CLI), the error card names the cause (close Chrome fully, or
    prefer `firefox`/`edge`), and raw ANSI/`ERROR: ERROR:` noise is stripped from
-   every message shown. A refused extractor is also no longer a dead end: the page
+   every message shown. A failure is also **remembered for the session**: the DB
+   cannot become readable twice, so the app stops re-reading it (that is what
+   used to print the same `ERROR:` line for every single request) and goes
+   straight to the anonymous path instead. **Settings → Video & capture →
+   *Cookies file*** takes precedence over the browser for both engines — an
+   exported `cookies.txt` always reads — and the **Check cookies** button reads
+   the configured source locally (no network) to say exactly what is broken. A refused extractor is also no longer a dead end: the page
    gets scanned and if it links a `master.m3u8`/mp4, **that** becomes the card —
    quality ladder included, hosting page attached as Referer, with a green
    "recovered after block" note.
@@ -182,6 +189,7 @@ webfinder/
 ├─ core/
 │  ├─ media.py              THE brain: sniff → ladder → yt-dlp matrix → plan_download
 │  ├─ gallery.py            gallery-dl bridge: profile walk → JSON → selectable items
+│  ├─ cookies.py            cookies.txt vs browser source, failure memory, probe
 │  ├─ embed.py              de-escape + mine media URLs from player configs/JSON
 │  ├─ sites.py              declarative recipe table (~75 sites) + player families
 │  ├─ net.py                browser headers, bot-wall detection, TLS impersonation
@@ -202,6 +210,7 @@ tools/test_desktop_contract.py
 python tools/test_video_core.py           # fixture-tested engine (no network)
 python tools/test_desktop_contract.py     # pywebview bridge hygiene
 python tools/test_instagram.py            # Instagram checker: gallery-dl bridge + routes (offline)
+python tools/test_cookies.py              # cookie source: file vs browser, failure memory
 python tools/recipe_probe.py <url>        # which recipe matches, what it finds (needs network)
 ```
 
