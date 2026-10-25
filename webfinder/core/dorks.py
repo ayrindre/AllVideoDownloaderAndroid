@@ -28,20 +28,13 @@ FILE_TYPES: dict[str, dict] = {
         "exts": {".jpg", ".jpeg", ".png", ".webp", ".gif", ".svg", ".bmp", ".tiff", ".heic", ".raw"},
     },
     "torrent": {
+        # Magnet search is part of Torrent now — one chip, both file kinds.
         "label": "Torrent",
         "icon": "torrent",
         "color": "#22c55e",
-        "dorks": ['(filetype:torrent OR inurl:".torrent")'],
+        "dorks": ['(filetype:torrent OR inurl:".torrent" OR inurl:magnet "xt=urn:btih")'],
         "exts": {".torrent"},
         "keywords": ["torrent", "magnet", "btih", "seeders", "tracker"],
-    },
-    "magnet": {
-        "label": "Magnet",
-        "icon": "magnet",
-        "color": "#f97316",
-        "dorks": ['inurl:magnet "xt=urn:btih"'],
-        "exts": set(),
-        "prefixes": ("magnet:",),
     },
     "software": {
         "label": "Software",
@@ -54,7 +47,8 @@ FILE_TYPES: dict[str, dict] = {
         "label": "Archive",
         "icon": "archive",
         "color": "#eab308",
-        "dorks": ['(filetype:zip OR filetype:rar OR filetype:7z OR filetype:tar OR filetype:gz)'],
+        "dorks": ['(filetype:zip OR filetype:rar OR filetype:7z OR filetype:tar OR filetype:gz)',
+                  'intitle:"index of" (zip OR rar OR 7z OR tar)'],
         "exts": {".zip", ".rar", ".7z", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".iso"},
     },
     "audio": {

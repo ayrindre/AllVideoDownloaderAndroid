@@ -224,15 +224,35 @@ _GOOGLE_IMG_RES = (
     re.compile(r'\["(https?://[^",]*googleusercontent\.com/[^"]{0,300})",(\d+),(\d+)\]'),
 )
 
-async def _google_isch(client: httpx.AsyncClient, query: str, limit: int, safe: bool) -> list[dict]:
+GOOGLE_ISCH_PARAMS = {"hl": "en", "gl": "us", "gbv": 1}
+
+
+async def _google_isch(client: httpx.AsyncClient, query: str, limit: int, safe: bool,
+                       proxy: str = "") -> str:
+    params = {"q": query, "tbm": "isch", "num": min(max(limit, 30), 100),
+              "safe": "active" if safe else "off", **GOOGLE_ISCH_PARAMS}
+    text = ""
+    # Attempt 0: curl_cffi Chrome fingerprint — beats the 200-but-empty shell
+    # that plain httpx gets served on strict networks.
+    try:
+        from . import tls
+        if tls.available():
+            status, text, final = await tls.google_get("https://www.google.com/search", params=params,
+                                                       cookies=GOOGLE_CONSENT, proxy=proxy)
+            if "sorry" not in final and text:
+                return text
+    except Exception:  # noqa: BLE001 — fall through to the httpx session
+        pass
     client.cookies.update(GOOGLE_CONSENT)
-    r = await client.get("https://www.google.com/search", params={
-        "q": query, "tbm": "isch", "hl": "en", "gl": "us", "num": min(max(limit, 30), 100),
-        "safe": "active" if safe else "off"},
-        headers={"Referer": "https://www.google.com/"})
+    r = await client.get("https://www.google.com/search", params=params,
+                         headers={"Referer": "https://www.google.com/"})
     if "sorry" in str(r.url):
         raise RuntimeError("Google served its captcha interstitial ('sorry' page)")
-    t = _unesc(r.text)
+    return r.text
+
+
+async def _google_isch_parse(client: httpx.AsyncClient, raw_text: str, query: str, limit: int) -> list[dict]:
+    t = _unesc(raw_text)
     out, seen = [], set()
     for rx in _GOOGLE_IMG_RES:
         for m in rx.finditer(t):
@@ -251,6 +271,12 @@ async def _google_isch(client: httpx.AsyncClient, query: str, limit: int, safe: 
     return out
 
 
+async def _google_images(client: httpx.AsyncClient, query: str, limit: int, safe: bool,
+                         proxy: str = "") -> list[dict]:
+    raw = await _google_isch(client, query, limit, safe, proxy)
+    return await _google_isch_parse(client, raw, query, limit)
+
+
 async def search_images(query: str, filters: dict | None, limit: int, safe: bool = False,
                         proxy: str = "") -> dict:
     f = filters or {}
@@ -260,7 +286,7 @@ async def search_images(query: str, filters: dict | None, limit: int, safe: bool
         jobs = {
             "bing": _bing_images(client, query, f, limit, safe),
             "duckduckgo": _ddg_images(client, query, limit, safe),
-            "google": _google_isch(client, query, limit, safe),
+            "google": _google_images(client, query, limit, safe, proxy),
         }
         gathered = await asyncio.gather(*jobs.values(), return_exceptions=True)
     for name, res in zip(jobs, gathered):
@@ -364,7 +390,7 @@ async def _bing_videos(client: httpx.AsyncClient, query: str, f: dict, limit: in
                                                re.search(r'length="(\d+)"', win).group(1)),
                            file_type="video", is_direct=False))
     # JSON-state style: "mediaurl"/"contentUrl" fields with windowed metadata
-    for m in re.finditer(r'"(?:mediaurl|mediaUrl|contentUrl)"\s*:\s*"(https?://[^"]+)"', t):
+    for m in re.finditer(r'"(?:mediaurl|mediaUrl|contentUrl|murl)"\s*:\s*"(https?://[^"]+?\.(?:mp4|webm|mov|m4v|mkv|avi)(?:[^"]{0,90}))"', t):
         url = htmllib.unescape(m.group(1))
         if not _okurl(url) or url in seen:
             continue
@@ -395,7 +421,9 @@ async def _video_dork_fallback(client: httpx.AsyncClient, query: str, limit: int
     seen: set[str] = set()
     for name in ("bing", "duckduckgo"):
         try:
-            res = await ENGINES[f"search_{name}"](client, full, min(limit, 40), safe)
+            # NOTE: ENGINES maps bare names — "search_bing" caused a silent
+            # KeyError that used to kill the whole dorked-video source.
+            res = await ENGINES[name](client, full, min(limit, 40), safe)
         except Exception:  # noqa: BLE001 — supplementary source only
             continue
         for r in res:
@@ -430,3 +458,289 @@ async def search_videos(query: str, filters: dict | None, limit: int, safe: bool
     results = _postfilter(results, f, "video")
     results = _dedupe(results, key=lambda r: r.get("url"))[:limit]
     return {"results": results, "sources": sources}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  TORRENT vertical — real torrent indexes (magnets + .torrent files)
+# ═══════════════════════════════════════════════════════════════════════════
+TRACKERS = ("udp://tracker.opentrackr.org:1337/announce"
+            "&tr=udp://open.stealth.si:80/announce"
+            "&tr=udp://tracker.torrent.eu.org:451/announce")
+
+
+def _torrent(title: str, url: str, *, page: str = "", torrent_url: str = "",
+             size=None, seeds=None, leeches=None, files=None, age: str = "",
+             source: str = "") -> dict:
+    d = _mk(url or torrent_url or page, "", title, page, 0, 0, source,
+             file_type="torrent", is_direct=False)
+    d.update({"size_bytes": int(size) if size else None,
+              "seeders": int(seeds) if seeds not in (None, "") else None,
+              "leechers": int(leeches) if leeches not in (None, "") else None,
+              "files": int(files) if files not in (None, "") else None,
+              "age": age, "torrent_url": torrent_url, "thumb": ""})
+    return d
+
+
+async def _apibay(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    """The Pirate Bay's official JSON API — info_hash → magnet, no scraping."""
+    r = await client.get("https://apibay.org/q.php", params={"q": query},
+                         headers={"Referer": "https://apibay.org/"})
+    r.raise_for_status()
+    try:
+        rows = r.json()
+    except Exception:  # noqa: BLE001
+        raise RuntimeError("apibay replied with non-JSON") from None
+    if isinstance(rows, dict):  # error objects like {"error":"1"}
+        return []
+    out = []
+    for row in rows[:limit]:
+        name = htmllib.unescape(row.get("name") or "").strip()
+        magnet = (row.get("link") or "").strip()
+        if not name or not magnet.startswith("magnet:"):
+            continue
+        if "tr=" not in magnet:  # augment bare btih magnets with healthy trackers
+            magnet += "&tr=" + TRACKERS
+        rid = str(row.get("ID") or "")
+        out.append(_torrent(name, magnet,
+                            torrent_url=f"https://apibay.org/t/{rid}" if rid else "",
+                            size=row.get("size"), seeds=row.get("seeders"),
+                            leeches=row.get("leechers"), files=row.get("num_files"),
+                            age=(row.get("added") or "")[:10], source="apibay"))
+    if not out:
+        raise RuntimeError("The Pirate Bay index returned nothing for this query")
+    return out
+
+
+async def _nyaa(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    """nyaa.si RSS — stable public feed with hashes and stats per item."""
+    r = await client.get("https://nyaa.si/", params={"page": "rss", "q": query})
+    r.raise_for_status()
+    if "<item" not in r.text:
+        raise RuntimeError("Nyaa RSS unavailable (blocked or malformed reply)")
+    out = []
+    for blk in re.findall(r"<item>(.*?)</item>", r.text, re.S)[:limit]:
+        def tag(name):
+            m = re.search(rf"<{name}[^>]*>(.*?)</{name}>", blk, re.S)
+            return htmllib.unescape(m.group(1)).strip() if m else ""
+        title = tag("title")
+        link = tag("link")
+        hash_m = re.search(r"<nyaa:infoHash>([0-9a-fA-F]{40})</nyaa:infoHash>", blk)
+        size = re.search(r"<nyaa:size>(\d+)</nyaa:size>", blk)
+        seeds = re.search(r"<nyaa:seeders>(\d+)</nyaa:seeders>", blk)
+        lech = re.search(r"<nyaa:leechers>(\d+)</nyaa:leechers>", blk)
+        if not title:
+            continue
+        magnet = (f"magnet:?xt=urn:btih:{hash_m.group(1)}&dn={quote_plus(title)}"
+                  f"&tr={TRACKERS}" if hash_m else "")
+        fid = re.search(r"/view/(\d+)", link)
+        out.append(_torrent(title, magnet or link, page=link,
+                            torrent_url=f"https://nyaa.si/download/{fid.group(1)}.torrent" if fid else "",
+                            size=size and size.group(1), seeds=seeds and seeds.group(1),
+                            leeches=lech and lech.group(1), source="nyaa"))
+    if not out:
+        raise RuntimeError("Nyaa feed had no entries for this query")
+    return out
+
+
+async def _1337x(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    """1337x search page — lenient row scrape; .torrent download pattern is stable."""
+    r = await client.get(f"https://1337x.to/search/{quote_plus(query)}/1/")
+    if r.status_code in (403, 429):
+        raise RuntimeError(f"1337x anti-bot ({r.status_code})")
+    r.raise_for_status()
+    out = []
+    for row in re.findall(r'<tr>.*?</tr>', r.text, re.S):
+        name_m = re.search(r'<a href="/torrent/(\d+)/[^"]*/"[^>]*>\s*([^<]{4,200}?)\s*</a>', row)
+        if not name_m:
+            continue
+        fid, name = name_m.group(1), htmllib.unescape(name_m.group(2)).strip()
+        cells = [re.sub(r"<[^>]+>", " ", c).strip() for c in re.findall(r"<td[^>]*>.*?</td>", row, re.S)]
+        size, nums = "", []
+        for txt in cells:
+            if re.search(r"\d+(?:\.\d+)?\s*(?:B|kB|KB|MB|GB|TB)\b", txt):
+                size = size or str(_human_size(txt))
+            elif re.fullmatch(r"\d[\d,]*", txt):
+                nums.append(txt.replace(",", ""))
+        seeds = nums[0] if nums else ""     # positional: search rows are size|seed|peer
+        leeches = nums[1] if len(nums) > 1 else ""
+        out.append(_torrent(name, "", page=f"https://1337x.to/torrent/{fid}/x/",
+                            torrent_url=f"https://1337x.to/torrent/{fid}.torrent",
+                            size=size, seeds=seeds, leeches=leeches, source="1337x"))
+        if len(out) >= limit:
+            break
+    if not out:
+        raise RuntimeError("1337x markup changed or search returned no rows")
+    return out
+
+
+_SIZE_UNITS = {"b": 1, "kb": 1024, "mb": 1024**2, "gb": 1024**3, "tb": 1024**4}
+
+
+def _human_size(text: str) -> int:
+    m = re.search(r"(\d+(?:[.,]\d+)?)\s*(B|kB|KB|MB|GB|TB)", text)
+    if not m:
+        return 0
+    return int(float(m.group(1).replace(",", ".")) * _SIZE_UNITS[m.group(2).lower()])
+
+
+async def search_torrents(query: str, filters: dict | None, limit: int, safe: bool = False,
+                          proxy: str = "") -> dict:
+    f = filters or {}
+    sources: dict[str, dict] = {}
+    results: list[dict] = []
+    async with _client({"Referer": "https://apibay.org/"}, proxy=proxy) as client:
+        jobs = {
+            "apibay": _apibay(client, query, limit),
+            "nyaa": _nyaa(client, query, limit),
+            "1337x": _1337x(client, query, limit),
+        }
+        gathered = await asyncio.gather(*jobs.values(), return_exceptions=True)
+    for name, res in zip(jobs, gathered):
+        sources[name] = _source_of(name, res)
+        if not isinstance(res, Exception):
+            results.extend(res)
+    min_seeds = int(f.get("min_seeds") or 0)
+    if min_seeds:
+        results = [r for r in results if (r.get("seeders") or 0) >= min_seeds]
+    results = _dedupe(results, key=lambda r: (r.get("url") or r.get("torrent_url") or r["title"]).lower())
+    # healthiest first — seed count is what makes a torrent actually downloadable
+    results.sort(key=lambda r: -(r.get("seeders") or 0))
+    return {"results": results, "sources": sources}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  E-BOOK vertical — real book FILES (Gutenberg / Internet Archive / Open Library)
+# ═══════════════════════════════════════════════════════════════════════════
+async def _gutendex(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    r = await client.get("https://gutendex.com/books", params={"search": query, "results_per_page": min(max(limit, 20), 64)})
+    r.raise_for_status()
+    data = r.json()
+    out = []
+    for bk in data.get("results", []):
+        fmts = bk.get("formats") or {}
+        url = (fmts.get("application/epub+zip") or fmts.get("text/html")
+               or fmts.get("application/x-mobipocket-ebook") or "")
+        if not url:
+            continue
+        author = ", ".join(a.get("name", "") for a in (bk.get("authors") or [])[:2])
+        title = htmllib.unescape(bk.get("title") or "")
+        out.append(_mk(url, fmts.get("image/jpeg") or "", f"{title}" + (f" — {author}" if author else ""),
+                       bk.get("url") or "", 0, 0, "gutenberg", file_type="book",
+                       is_direct=True, publisher=author,
+                       extra={"downloads": bk.get("download_count") or 0, "year": ""}))
+    if not out:
+        raise RuntimeError("Project Gutenberg had no matching books")
+    return out
+
+
+async def _internet_archive(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    r = await client.get("https://archive.org/advancedsearch.php", params={
+        "q": f"({query}) AND mediatype:(texts)", "fl[]": ["identifier", "title", "year"],
+        "rows": min(max(limit // 2, 8), 20), "page": 1, "output": "json",
+        "sort[]": "downloads desc"})
+    r.raise_for_status()
+    docs = (((r.json() or {}).get("response") or {}).get("docs")) or []
+    if not docs:
+        raise RuntimeError("Internet Archive found no matching texts")
+
+    async def one(doc: dict) -> dict | None:
+        ident = doc.get("identifier") or ""
+        title = htmllib.unescape(str(doc.get("title") or ident)) + (f" ({doc['year']})" if doc.get("year") else "")
+        item = {"title": title, "url": "", "thumb": f"https://archive.org/services/img/{ident}",
+                "page": f"https://archive.org/details/{ident}", "domain": "archive.org",
+                "width": 0, "height": 0, "engine": "internetarchive", "snippet": "",
+                "size_bytes": None, "duration": None, "file_type": "book", "is_direct": False,
+                "publisher": "", "year": str(doc.get("year") or "")}
+        try:  # metadata → pick a real downloadable file
+            meta = (await client.get(f"https://archive.org/metadata/{ident}")).json()
+            server, root = meta.get("server"), meta.get("dir") or ""
+            best = None
+            for fil in ((meta.get("files") or [])):
+                name = (fil.get("name") or "").lower()
+                if name.endswith((".pdf", ".epub", ".djvu")):
+                    pref = {".pdf": 0, ".epub": 1, ".djvu": 2}[name[-4:]]
+                    if best is None or pref < best[0]:
+                        best = (pref, fil.get("name"), int(fil.get("size") or 0))
+            if best and server:
+                item["url"] = f"https://{server}/download/{ident}/{quote_plus(best[1])}"
+                item["size_bytes"] = best[2] or None
+        except Exception:  # noqa: BLE001 — details stay optional
+            pass
+        return item
+
+    gathered = await asyncio.gather(*(one(d) for d in docs[:10]), return_exceptions=True)
+    out = [g for g in gathered if isinstance(g, dict) and g["url"]]
+    if not out:
+        # keep read-only entries as fallback so the source still contributes
+        out = [g for g in gathered if isinstance(g, dict)]
+    if not out:
+        raise RuntimeError("Internet Archive metadata fetch failed")
+    return out
+
+
+async def search_ebooks(query: str, filters: dict | None, limit: int, safe: bool = False,
+                        proxy: str = "") -> dict:
+    f = filters or {}
+    sources: dict[str, dict] = {}
+    results: list[dict] = []
+    async with _client(proxy=proxy) as client:
+        jobs = {
+            "gutenberg": _gutendex(client, query, limit),
+            "internetarchive": _internet_archive(client, query, limit),
+        }
+        gathered = await asyncio.gather(*jobs.values(), return_exceptions=True)
+    for name, res in zip(jobs, gathered):
+        sources[name] = _source_of(name, res)
+        if not isinstance(res, Exception):
+            results.extend(res)
+    fmt = (f.get("format") or "").lower()
+    if fmt:
+        results = [r for r in results if fmt in (r.get("url") or "").lower()]
+    results = _dedupe(results, key=lambda r: (r.get("url") or r.get("page") or r["title"]).lower())[:limit]
+    return {"results": results, "sources": sources}
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  ARCHIVE vertical — dorked web, hard-relevance-gated to actual files/dirs
+# ═══════════════════════════════════════════════════════════════════════════
+async def search_archives(query: str, filters: dict | None, limit: int, safe: bool = False,
+                          proxy: str = "") -> dict:
+    """Archives have no public media index — so we dork harder (intitle:"index of")
+    and then GATE: a result only survives when its URL or title actually names a
+    compressed file or a directory listing. Pages about zip files never pass."""
+    from ..engines import ENGINES
+    from . import dorks as dk
+    f = filters or {}
+    ext = (f.get("ext") or "").strip(". ")
+    mod = f"filetype:{ext}" if ext else "zip OR rar OR 7z OR tar OR gz"
+    q = f'{query} ("index of" OR "download") ({mod})'
+    sources: dict[str, dict] = {}
+    kept: list[dict] = []
+    dropped = 0
+    async with _client(proxy=proxy) as client:
+        jobs = {}
+        for name in ("bing", "duckduckgo", "mojeek"):
+            if name in ENGINES:
+                jobs[name] = ENGINES[name](client, q, max(limit, 30), safe)
+        gathered = await asyncio.gather(*jobs.values(), return_exceptions=True)
+    for name, res in zip(jobs, gathered):
+        if isinstance(res, Exception):
+            sources[name] = _source_of(name, res)
+            continue
+        rows = [r for r in res if _archive_relevant(r)]
+        dropped += len(res) - len(rows)
+        for r in rows:
+            r.setdefault("thumb", "")
+            r["file_type"] = "archive"
+            r["is_direct"] = bool(re.search(r"\.(zip|rar|7z|t?gz|bz2|xz|iso)(\?|#|$)", r["url"], re.I))
+        kept.extend(rows)
+        sources[name] = {"ok": True, "error": (f"page-only hits dropped: {len(res) - len(rows)}" if dropped else ""),
+                         "count": len(rows)}
+    kept = _dedupe(kept, key=lambda r: r["url"])[:limit]
+    return {"results": kept, "sources": sources, "dropped_irrelevant": dropped}
+
+
+def _archive_relevant(r: dict) -> bool:
+    blob = (r.get("url", "") + " " + r.get("title", "") + " " + r.get("snippet", "")).lower()
+    return bool(re.search(r"\.(zip|rar|7z|tar|t?gz|bz2|xz|iso)\b", blob)
+                or "index of" in blob or "directory listing" in blob)

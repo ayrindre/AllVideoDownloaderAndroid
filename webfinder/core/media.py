@@ -232,7 +232,7 @@ def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
                        "codecs": sorted(formats[0]["exts"])[:3], "fps": 0,
                        "format": "bestaudio/best", "size": None})
 
-    return {
+    media = {
         "kind": "media", "url": url, "file_type": "video",
         "extractor": info.get("extractor_key", "yt-dlp"),
         "title": info.get("title") or "Untitled",
@@ -246,6 +246,10 @@ def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
         "needs_ffmpeg_merge": not find_ffmpeg()["available"],
         "ffmpeg": find_ffmpeg()["available"],
     }
+    # MUST be a (media, error) tuple — `analyze()` unpacks `media, yt_err = …`.
+    # Returning the bare dict here made every SUCCESSFUL extraction crash with
+    # "too many values to unpack (expected 2, got 14)" (14 = the dict's keys).
+    return media, ""
 
 
 async def _try_ytdlp(url: str) -> tuple[dict | None, str]:
@@ -444,3 +448,73 @@ def build_search_results(query: str, types: list[str], engines: list[str], limit
                     for e in (engines or ["demo"])],
         "results": results,
     }
+
+
+def demo_torrent_results(query: str, limit: int) -> dict:
+    import hashlib
+    from urllib.parse import quote_plus
+    sizes = [747_124_572, 1_932_735_283, 38_224_524, 4_295_000_000, 862_419_712]
+    results = []
+    for i in range(min(limit, 15)):
+        h = hashlib.md5(f"t{query}{i}".encode()).hexdigest()
+        results.append({
+            "title": f"{query.title()} [1080p x264] — demo release {i + 1}",
+            "url": f"magnet:?xt=urn:btih:{h}&dn={quote_plus(query)}",
+            "torrent_url": f"https://demo.torrents/site/{h}.torrent",
+            "thumb": "", "page": f"https://demo.torrents/t/{i + 1000}/",
+            "domain": "demo.torrents", "engine": ["apibay", "nyaa", "1337x"][i % 3],
+            "size_bytes": sizes[i % len(sizes)], "seeders": 240 - i * 12,
+            "leechers": 30 + i, "files": 2 + i % 14, "age": "2026-09-1X",
+            "file_type": "torrent", "is_direct": False, "duration": None, "demo": True,
+        })
+    return {"query": query, "raw_query": query, "types": ["torrent"], "mode": "torrents",
+            "elapsed_ms": 260, "demo": True, "vertical_blocked": False,
+            "engines": [{"engine": e, "ok": True, "error": "", "count": 5}
+                        for e in ("apibay", "nyaa", "1337x")],
+            "results": results}
+
+
+def demo_ebook_results(query: str, limit: int) -> dict:
+    import hashlib
+    results = []
+    for i in range(min(limit, 14)):
+        seed = hashlib.md5(f"b{query}{i}".encode()).hexdigest()[:8]
+        ext = ["epub", "pdf", "epub", "djvu"][i % 4]
+        results.append({
+            "title": f"{query.title()} — demo library edition {i + 1}",
+            "url": f"https://www.gutenberg.org/files/demo/{seed}.{ext}",
+            "thumb": f"https://picsum.photos/seed/{seed}/300/420",
+            "page": f"https://archive.org/details/demo_{seed}",
+            "domain": "gutenberg.org", "engine": ["gutenberg", "internetarchive"][i % 2],
+            "size_bytes": (i + 3) * 1_400_000, "width": 0, "height": 0,
+            "publisher": ["A. Author", "B. Writer", "C. Novelist"][i % 3],
+            "year": str(1880 + i * 7), "file_type": "book", "is_direct": True,
+            "duration": None, "demo": True,
+        })
+    return {"query": query, "raw_query": query, "types": ["ebook"], "mode": "ebooks",
+            "elapsed_ms": 300, "demo": True, "vertical_blocked": False,
+            "engines": [{"engine": e, "ok": True, "error": "", "count": 7}
+                        for e in ("gutenberg", "internetarchive")],
+            "results": results}
+
+
+def demo_archive_results(query: str, limit: int) -> dict:
+    import hashlib
+    results = []
+    for i in range(min(limit, 12)):
+        seed = hashlib.md5(f"a{query}{i}".encode()).hexdigest()[:8]
+        ext = ["zip", "rar", "7z", "tar.gz"][i % 4]
+        results.append({
+            "title": f"{query.title()}.{ext} — demo mirror {i + 1}",
+            "url": f"https://files.example.org/pub/{seed}/{query.replace(' ', '_')}.{ext}",
+            "thumb": "", "page": "",
+            "domain": "files.example.org", "engine": ["bing", "duckduckgo", "mojeek"][i % 3],
+            "snippet": "Directory listing with checksums and mirrors.",
+            "size_bytes": (i + 2) * 23_500_000, "file_type": "archive",
+            "is_direct": True, "width": 0, "height": 0, "duration": None, "demo": True,
+        })
+    return {"query": query, "raw_query": query, "types": ["archive"], "mode": "archives",
+            "elapsed_ms": 340, "demo": True, "vertical_blocked": False,
+            "engines": [{"engine": e, "ok": True, "error": "", "count": 4}
+                        for e in ("bing", "duckduckgo", "mojeek")],
+            "results": results}

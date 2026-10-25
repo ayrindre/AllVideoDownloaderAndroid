@@ -64,12 +64,19 @@
     $("#btn-close").innerHTML = ICONS.svg("x");
     const bridge = window.API.bridge;
     $("#btn-min").onclick = () => runDesktop(bridge.minimize);
-    $("#btn-max").onclick = (e) => {
-      runDesktop(bridge.toggleMaximize);
-      const icon = $("#btn-max").innerHTML.includes("square") ? "restore" : "square";
-      $("#btn-max").innerHTML = ICONS.svg(icon);
-      e.currentTarget.animate([{ transform: "scale(.8)" }, { transform: "scale(1)" }], { duration: 180, easing: "cubic-bezier(.34,1.56,.64,1)" });
+    const setMaxIcon = (maxed) => { $("#btn-max").innerHTML = ICONS.svg(maxed ? "restore" : "square"); $("#btn-max").dataset.maxed = maxed ? "1" : ""; };
+    $("#btn-max").onclick = async (e) => {
+      const btn = e.currentTarget;   // capture pre-await: currentTarget clears after dispatch
+      const next = await runDesktop(bridge.toggleMaximize);
+      setMaxIcon(typeof next === "boolean" ? next : !btn.dataset.maxed);
+      btn.animate([{ transform: "scale(.8)" }, { transform: "scale(1)" }], { duration: 180, easing: "cubic-bezier(.34,1.56,.64,1)" });
     };
+    // double-click on the (draggable) titlebar = maximize/restore, like native windows
+    document.querySelector(".titlebar").addEventListener("dblclick", async (e) => {
+      if (!bridge.isDesktop || e.target.closest(".no-drag")) return;
+      const next = await runDesktop(bridge.toggleMaximize);
+      setMaxIcon(typeof next === "boolean" ? next : !$("#btn-max").dataset.maxed);
+    });
     $("#btn-close").onclick = () => {
       if (!bridge.isDesktop) { toast("Browser mode — closing the tab instead. Use `python run.py` for the native window.", "info"); return; }
       runDesktop(bridge.close);
@@ -77,7 +84,7 @@
     $("#app-version").textContent = `v${S.meta?.version || "1.0"}`;
     document.title = "WebFinder";
   }
-  async function runDesktop(fn) { try { await fn?.(); } catch { /* browser mode */ } }
+  async function runDesktop(fn) { try { return await fn?.(); } catch { /* browser mode */ } }
 
   function wireWindow() {
     // in the sandbox/browser preview there is no frameless chrome to emulate drag

@@ -168,6 +168,15 @@ class DownloadManager:
                 job.status = "done"
                 job.finished_at = time.time()
                 job.speed, job.eta = 0, 0
+                # Reconcile the progress bar / "saved" stat with the REAL bytes
+                # on disk — streamed totals can be estimates (server lied,
+                # ytdlp merged extra streams, resume offsets double-count).
+                try:
+                    p = Path(job.filepath) if getattr(job, "filepath", "") else None
+                    if p is not None and p.exists() and job.unit == "bytes":
+                        job.done = job.total = p.stat().st_size
+                except OSError:
+                    pass
             self.publish(job)
 
     def pause(self, job_id: str) -> bool:

@@ -33,7 +33,9 @@
     },
     totalSaved() {
       let b = 0;
-      this.jobs.forEach((j) => { if (j.status === "done") b += j.done || 0; });
+      // byte-unit finished jobs only — an HLS job's `done` is SECONDS and used
+      // to leak into this sum as "bytes", scrambling the saved-size stat.
+      this.jobs.forEach((j) => { if (j.status === "done" && j.unit !== "time") b += (j.done || j.total || 0); });
       return b;
     },
     upsertJob(j) {

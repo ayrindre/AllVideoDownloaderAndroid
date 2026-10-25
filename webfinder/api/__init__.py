@@ -123,6 +123,21 @@ def _normalize(url: str) -> str:
     return f"{host}{p.path.rstrip('/')}{'' if not p.query else '?' + p.query[:80]}".lower()
 
 
+# Single-type selections that must hit DEDICATED indexes, never web search.
+VERTICAL_ROUTES: dict[str, tuple[str, str, object]] = {
+    "image":   ("images",   "images",   None),   # fn bound below (import order)
+    "video":   ("videos",   "videos",   None),
+    "torrent": ("torrents", "torrents", None),
+    "ebook":   ("ebooks",   "ebooks",   None),
+    "archive": ("archives", "archives", None),
+}
+VERTICAL_ROUTES["image"] = VERTICAL_ROUTES["image"][:2] + (verticals.search_images,)
+VERTICAL_ROUTES["video"] = VERTICAL_ROUTES["video"][:2] + (verticals.search_videos,)
+VERTICAL_ROUTES["torrent"] = VERTICAL_ROUTES["torrent"][:2] + (verticals.search_torrents,)
+VERTICAL_ROUTES["ebook"] = VERTICAL_ROUTES["ebook"][:2] + (verticals.search_ebooks,)
+VERTICAL_ROUTES["archive"] = VERTICAL_ROUTES["archive"][:2] + (verticals.search_archives,)
+
+
 @router.post("/search")
 async def search(body: SearchRequest):
     cfg = settings.snapshot()
@@ -134,25 +149,26 @@ async def search(body: SearchRequest):
     data: dict | None = None
 
     if cfg["demo_mode"]:
-        if body.types == ["image"]:
-            data = media.demo_image_results(body.query, limit)
-        elif body.types == ["video"]:
-            data = media.demo_video_results(body.query, limit)
+        _demo_map = {"image": media.demo_image_results, "video": media.demo_video_results,
+                     "torrent": media.demo_torrent_results, "ebook": media.demo_ebook_results,
+                     "archive": media.demo_archive_results}
+        if len(body.types) == 1 and body.types[0] in _demo_map:
+            data = _demo_map[body.types[0]](body.query, limit)
         else:
             data = media.build_search_results(body.query, body.types, engines, limit)
 
-    # ── vertical mode: ONE media type selected → query the engines' media indexes
-    elif cfg.get("vertical_mode") and len(body.types) == 1 and body.types[0] in ("image", "video"):
-        kind = body.types[0]
-        vf = (body.filters or {}).get("images" if kind == "image" else "videos") or {}
-        fn = verticals.search_images if kind == "image" else verticals.search_videos
+    # ── vertical mode: ONE media-file type selected → query dedicated indexes.
+    #    No web fallback ever: garbage pages are worse than an explained empty state.
+    elif cfg.get("vertical_mode") and len(body.types) == 1 and body.types[0] in VERTICAL_ROUTES:
+        mode, fkey, fn = VERTICAL_ROUTES[body.types[0]]
+        vf = (body.filters or {}).get(fkey) or {}
         vdata = await fn(body.query, vf, limit, safe, cfg.get("proxy", ""))
         # NOTE: deliberately NO fallthrough to dorked web search here — mixing
         # irrelevant web pages into an image/video request is worse than an
         # honest "indexes blocked" state the UI can explain.
         data = {
             "query": body.query, "raw_query": body.query, "types": body.types,
-            "mode": "images" if kind == "image" else "videos",
+            "mode": mode,
             "elapsed_ms": int((time.time() - t0) * 1000),
             "filters": vf,
             "vertical_blocked": not vdata["results"],

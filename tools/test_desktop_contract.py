@@ -94,7 +94,8 @@ def test_pywebview_scan_completes_cleanly() -> None:
         sys.setrecursionlimit(old_limit)
 
     assert not errors, f"pywebview scan logged errors on the bridge: {errors[:3]}"
-    assert sorted(fns) == ["close", "minimize", "pick_folder", "toggle_maximize"], fns
+    assert sorted(fns) == ["close", "is_maximized", "minimize", "pick_folder",
+                      "toggle_maximize"], fns
 
 
 if __name__ == "__main__":

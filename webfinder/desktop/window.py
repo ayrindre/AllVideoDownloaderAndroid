@@ -29,16 +29,33 @@ class DesktopBridge:
 
     def __init__(self) -> None:
         self._window = None  # MUST be private — see class docstring
+        self._max = False    # fallback flag when native introspection is absent
 
     # -- window controls ----------------------------------------------------
     def minimize(self):
         self._window.minimize()
 
+    def _is_maximized(self) -> bool:
+        """Ask the live WinForms form — Window.maximized is a STATIC init flag
+        that never updates, which used to make 'restore' impossible (it always
+        re-maximized). Fall back to our own flag on non-Windows/preview runs."""
+        try:
+            return str(self._window.native.WindowState) in ("Maximized", "1")
+        except Exception:  # noqa: BLE001
+            return self._max
+
     def toggle_maximize(self):
-        if self._window.maximized:
+        maximized = self._is_maximized()
+        if maximized:
             self._window.restore()
-        else:
-            self._window.maximize()
+            self._max = False
+            return False
+        self._window.maximize()
+        self._max = True
+        return True
+
+    def is_maximized(self):
+        return self._is_maximized()
 
     def close(self):
         self._window.destroy()

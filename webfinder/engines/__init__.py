@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from html import unescape
 from typing import Callable
 from urllib.parse import quote_plus, urlparse, parse_qs, unquote
+from ..core import tls
 
 import httpx
 
@@ -207,8 +208,22 @@ def _parse_google_html(html: str, limit: int) -> list[dict]:
 
 
 async def search_google(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
+    from ..config import settings
     params = {"q": query, "num": min(max(limit, 30), 100), "hl": "en", "gl": "us",
               "gbv": 1, "safe": "active" if safe else "off", "filter": 0}
+    # Attempt 0 — curl_cffi with a real Chrome TLS fingerprint. This is the
+    # single most effective fix for "Google returns 0 hits" on filtered or
+    # bot-walled networks (httpx's JA3 gets served a consent/captcha shell).
+    if tls.available():
+        try:
+            status, text, final = await tls.google_get(
+                "https://www.google.com/search", params=params,
+                cookies=GOOGLE_CONSENT_COOKIES, proxy=settings.get("proxy") or "")
+            out = _parse_google_html(text, limit)
+            if out:
+                return out
+        except Exception:  # noqa: BLE001 — fall through to the httpx attempts
+            pass
     client.cookies.update(GOOGLE_CONSENT_COOKIES)
     resp = await client.get("https://www.google.com/search", params=params)
     resp.raise_for_status()

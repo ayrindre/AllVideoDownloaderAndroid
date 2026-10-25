@@ -17,3 +17,4 @@ pywebview>=5.1       # WebView2 (Chromium) window: frameless, HW-accelerated
 
 # --- External tools (not pip — install on the target machine) -------------
 # ffmpeg / ffprobe   -> winget install Gyan.FFmpeg   (required for .m3u8/.mpd capture)
+curl-cffi>=0.7

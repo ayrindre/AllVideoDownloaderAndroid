@@ -84,8 +84,8 @@
     box.innerHTML = `Query preview: <b>${escapeHtml(q || "…")}</b>${dorks.length ? ` ${dorks.map((d) => `<b>${escapeHtml(d)}</b>`).join(" OR ")}` : ""}`;
   }
   const FILETYPE_DORKS = {
-    video: "filetype:mp4/mkv/webm", image: "filetype:jpg/png/webp", torrent: "filetype:torrent",
-    magnet: "inurl:magnet btih", software: "filetype:exe/msi", archive: "filetype:zip/rar/7z",
+    video: "filetype:mp4/mkv/webm", image: "filetype:jpg/png/webp", torrent: "filetype:torrent/magnet",
+    software: "filetype:exe/msi", archive: "filetype:zip/rar/7z",
     audio: "filetype:mp3/flac", ebook: "filetype:pdf/epub",
   };
 
@@ -176,7 +176,8 @@
       { transform: "translateX(-4px)" }, { transform: "translateX(0)" }], { duration: 280, easing: "ease-out" });
   }
 
-  const VERTICAL_LABELS = { web_dorks: "Video dorks" };
+  const VERTICAL_LABELS = { web_dorks: "Video dorks", apibay: "ThePirateBay", nyaa: "Nyaa",
+    "1337x": "1337x", gutenberg: "Gutenberg", internetarchive: "Internet Archive" };
   function renderEngineStrip(data) {
     const strip = $("#engine-strip");
     strip.innerHTML = "";
@@ -188,7 +189,8 @@
         e.ok ? `${e.count} hits` : "blocked"));
     });
     const n = (data.results || []).length;
-    const mode = data.mode === "images" ? "image index" : data.mode === "videos" ? "video index" : "web";
+    const mode = { images: "image index", videos: "video index", torrents: "torrent indexes",
+                   ebooks: "book library", archives: "file-gated web" }[data.mode] || "web";
     $("#rh-meta").textContent = `${n} result${n === 1 ? "" : "s"} · ${data.elapsed_ms} ms · ${mode}${data.demo ? " · demo data" : ""}`;
   }
 
@@ -217,7 +219,7 @@
     const grid = $("#results-grid");
     grid.innerHTML = "";
     const data = state.lastData;
-    const vertical = data?.mode === "images" || data?.mode === "videos";
+    const vertical = ["images", "videos", "torrents", "ebooks", "archives"].includes(data?.mode);
     $("#result-filter").classList.toggle("hidden", vertical);
     grid.classList.toggle("grid-media", !!vertical);
     let list = data?.results || [];
@@ -275,9 +277,13 @@
       const box = $("#results-empty");
       box.classList.remove("hidden");
       box.innerHTML = "";
-      box.append(el("div", { class: "re-ico", html: ICONS.svg(mode === "videos" ? "video" : "image") }),
-        el("h3", {}, mode === "videos" ? "The video indexes came back empty" : "The image indexes came back empty"),
-        el("p", {}, "WebFinder queries Bing, DuckDuckGo and Google media indexes in parallel. This search is never padded with irrelevant web pages — here is what each index said:"));
+      const HEAD = { images: ["image", "Bing, DuckDuckGo and Google media indexes"], videos: ["video", "Bing, DuckDuckGo and video-file dork sources"],
+                     torrents: ["torrent", "The Pirate Bay (apibay), Nyaa and 1337x"], ebooks: ["book", "Project Gutenberg and Internet Archive"],
+                     archives: ["archive", "dorked engines with a hard file-relevance gate"] };
+      const hd = HEAD[mode] || HEAD.images;
+      box.append(el("div", { class: "re-ico", html: ICONS.svg(hd[0]) }),
+        el("h3", {}, `The ${mode.replace(/s$/, "")} indexes came back empty`),
+        el("p", {}, `WebFinder queries ${hd[1]} in parallel. This search is never padded with irrelevant web pages — here is what each index said:`));
       const why = el("div", { style: { margin: "18px auto 0", maxWidth: "560px", textAlign: "left", display: "grid", gap: 7 } });
       (data.engines || []).forEach((e) => {
         why.append(el("div", { class: "notice " + (e.ok ? "info" : "warn"), style: { marginBottom: 0 } },
@@ -298,19 +304,30 @@
   }
 
   function mediaCard(r, mode, i) {
-    const isVideo = mode === "videos";
+    const isVideo = mode === "videos", isTorrent = mode === "torrents";
+    const mkImg = (src) => {
+      const im = el("img", { class: "mc-thumb", alt: "", loading: "lazy", src });
+      im.onerror = () => im.replaceWith(fileTile(r, mode));
+      return im;
+    };
+    const tile = r.thumb ? mkImg(r.thumb)
+      : (mode === "images" && /\.(jpe?g|png|webp|gif|avif)(\?|#|$)/i.test(r.url)) ? mkImg(r.url)
+      : fileTile(r, mode);
     const badge = isVideo
       ? (r.duration ? fmtDurationLocal(r.duration) : (r.height ? `${r.height}p` : "clip"))
-      : (r.width && r.height ? `${r.width}×${r.height}` : "");
-    const img = el("img", { class: "mc-thumb", alt: "", loading: "lazy", src: r.thumb || r.url });
-    img.onerror = () => { img.remove(); };
-    const card = el("figure", { class: "mcard", tabindex: 0, style: { "--i": Math.min(i, 20) } },
-      img,
+      : isTorrent
+        ? [r.seeders != null ? `${r.seeders} seeds` : "", r.size_bytes ? fmtBytes(r.size_bytes) : ""].filter(Boolean).join(" · ")
+        : mode === "ebooks"
+          ? [r.year, r.size_bytes ? fmtBytes(r.size_bytes) : ""].filter(Boolean).join(" · ")
+          : (r.width && r.height ? `${r.width}×${r.height}` : (r.size_bytes ? fmtBytes(r.size_bytes) : ""));
+    const card = el("figure", { class: `mcard${isTorrent ? " mcard-torrent" : ""}`, tabindex: 0, style: { "--i": Math.min(i, 20) } },
+      tile,
       badge ? el("span", { class: "mc-badge" }, badge) : null,
       el("div", { class: "mc-actions" },
-        el("button", { class: "fab", title: isVideo ? "Play source" : "Open full size", html: ICONS.svg(isVideo ? "play" : "external") }),
-        el("button", { class: "fab fab-copy", title: "Copy direct link" }, el("span", { html: ICONS.svg("copy") })),
-        el("button", { class: "fab fab-dl", title: "Download in WebFinder" }, el("span", { html: ICONS.svg("download") }))),
+        (r.page || isVideo) ? el("button", { class: "fab", title: isVideo ? "Play source" : "Open source page", html: ICONS.svg(isVideo ? "play" : "external") }) : null,
+        el("button", { class: "fab fab-copy", title: isTorrent ? "Copy magnet link" : "Copy direct link" }, el("span", { html: ICONS.svg("copy") })),
+        (isTorrent && !r.torrent_url) ? null
+          : el("button", { class: "fab fab-dl", title: isTorrent ? "Save .torrent file" : "Download in WebFinder" }, el("span", { html: ICONS.svg("download") }))),
       el("figcaption", {},
         el("div", { class: "mc-title" }, r.title || ""),
         el("div", { class: "mc-src" },
@@ -318,25 +335,38 @@
           r.publisher ? el("span", { class: "mc-pub" }, r.publisher) : null,
           el("span", { class: "mc-eng" }, r.engine || ""))));
 
-    card.querySelector(".mc-actions .fab:not(.fab-copy):not(.fab-dl)")
-      .addEventListener("click", () => window.open(r.page || r.url, "_blank", "noopener"));
+    const openBtn = card.querySelector(".mc-actions .fab:not(.fab-copy):not(.fab-dl)");
+    if (openBtn) openBtn.addEventListener("click", () => window.open(r.page || r.url, "_blank", "noopener"));
     card.querySelector(".fab-copy").addEventListener("click", async (e) => {
+      const btn = e.currentTarget;   // MUST capture pre-await: currentTarget nulls out after dispatch
       await window.UI.copyText(r.url);
-      e.currentTarget.classList.add("copied"); setTimeout(() => e.currentTarget.classList.remove("copied"), 900);
-      toast("Direct link copied — paste into IDM.", "ok", { icon: "copy" });
+      btn.classList.add("copied"); setTimeout(() => { if (btn.isConnected) btn.classList.remove("copied"); }, 900);
+      toast(isTorrent ? "Magnet copied — paste into your torrent client." : "Direct link copied — paste into IDM.", "ok", { icon: "copy" });
     });
-    card.querySelector(".fab-dl").addEventListener("click", async (e) => {
+    const dlBtn = card.querySelector(".fab-dl");
+    if (dlBtn) dlBtn.addEventListener("click", async (e) => {
       const btn = e.currentTarget;
       btn.innerHTML = `<span class="spinner"></span>`;
       try {
-        await window.API.startDownload({ url: r.url, title: r.title || "", file_type: mode === "videos" ? "video" : "image" });
-        toast("Added to the download queue.", "ok", { icon: "dl", actionLabel: "View", onAction: () => S.emit("nav", "view-downloads") });
+        const url = isTorrent ? r.torrent_url : r.url;
+        const ft = { videos: "video", torrents: "torrent", ebooks: "ebook", archives: "archive" }[mode] || "image";
+        await window.API.startDownload({ url, title: r.title || "", file_type: ft });
+        toast(isTorrent ? ".torrent file queued." : "Added to the download queue.", "ok", { icon: "dl", actionLabel: "View", onAction: () => S.emit("nav", "view-downloads") });
       } catch (err) { toast(err.message, "err"); }
       finally { btn.innerHTML = `<span>${ICONS.svg("download")}</span>`; }
     });
     card.addEventListener("dblclick", () => window.open(r.url, "_blank", "noopener"));
     return card;
   }
+  function fileTile(r, mode) {
+    const ext = (String(r.url || "").match(/\.([a-z0-9]{2,5})(?:[?#]|$)/i) || [])[1]
+      || { torrents: "TORRENT", ebooks: "BOOK", archives: "ARCH" }[mode] || "FILE";
+    const iconKey = { torrents: "torrent", ebooks: "book", archives: "archive" }[mode] || "download";
+    return el("div", { class: "mc-file", title: String(ext).toUpperCase() },
+      el("span", { class: "mc-file-ico", html: ICONS.svg(iconKey) }),
+      el("b", {}, String(ext).toUpperCase().slice(0, 5)));
+  }
+
   function fmtDurationLocal(sec) {
     sec = Math.round(sec || 0);
     const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
@@ -355,9 +385,10 @@
     // the copy-link button always copies the *best* download URL we know of
     card.querySelector(".fab-copy").addEventListener("click", async (e) => {
       const best = r.media_candidates?.[0]?.url || r.url;
+      const btn = e.currentTarget;   // capture before await (spec: currentTarget → null after dispatch)
       const ok = await window.UI.copyText(best);
-      e.currentTarget.classList.add("copied");
-      setTimeout(() => e.currentTarget.classList.remove("copied"), 900);
+      btn.classList.add("copied");
+      setTimeout(() => { if (btn.isConnected) btn.classList.remove("copied"); }, 900);
       toast(ok ? (r.media_candidates?.length ? "Direct file link copied — paste into IDM or your browser." : "Download link copied to clipboard.") : "Clipboard blocked by the browser.",
         ok ? "ok" : "err");
     });
@@ -441,6 +472,12 @@
       { key: "duration", label: "Length", opts: [["", "Any"], ["short", "Under 4 min"], ["medium", "4–20 min"], ["long", "Over 20 min"]] },
       { key: "min_res", label: "Min height", opts: [["", "Any"], ["480", "480p+"], ["720", "720p+"], ["1080", "1080p+"]] },
     ] },
+    torrents: { label: "Torrents", fields: [
+      { key: "min_seeds", label: "Min seeders", opts: [["", "Any"], ["5", "5+"], ["20", "20+"], ["50", "50+"]] },
+    ] },
+    ebooks: { label: "E-Books", fields: [
+      { key: "format", label: "Format", opts: [["", "Any"], ["epub", "EPUB"], ["pdf", "PDF"], ["djvu", "DjVu"]] },
+    ] },
   };
 
   let popEl = null;
@@ -488,9 +525,9 @@
         })));
     }
     popEl.append(el("div", { class: "pop-foot" },
-      el("span", {}, "Color/kind filters ride Bing's image index; size & aspect are also enforced locally."),
+      el("span", {}, "Image color/kind ride Bing's index; size, seeds & format are enforced locally."),
       el("button", { class: "btn btn-ghost btn-sm", onclick: () => {
-        S.searchFilters = { images: {}, videos: {} };
+        S.searchFilters = { images: {}, videos: {}, torrents: {}, ebooks: {} };
         closePop(); badge();
         if (S.lastQuery && !state.loading) run();
       } }, "Reset")));
