@@ -284,6 +284,10 @@ class DownloadManager:
         headers = net.browser_headers(job.meta.get("referer") or "")
         headers.update({"Accept": "*/*", "Accept-Encoding": "identity",
                         "Sec-Fetch-Dest": "video", "Sec-Fetch-Mode": "no-cors"})
+        # job-specific headers (e.g. the Instagram checker's CDN referer)
+        for k, v in (job.meta.get("headers") or {}).items():
+            if isinstance(k, str) and isinstance(v, str) and v:
+                headers[k] = v
         if offset:
             headers["Range"] = f"bytes={offset}-"
         mode = "ab" if offset else "wb"

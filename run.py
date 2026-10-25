@@ -110,11 +110,11 @@ def main() -> None:
                     return
                 import subprocess as _sp
                 r = _sp.run([sys.executable, "-m", "pip", "install", "-U", "--quiet",
-                             "--disable-pip-version-check", "yt-dlp"],
-                            capture_output=True, text=True, timeout=240)
+                             "--disable-pip-version-check", "yt-dlp", "gallery-dl"],
+                            capture_output=True, text=True, timeout=300)
                 if r.returncode == 0:
                     stamp.touch()
-                    print("[avd] yt-dlp refreshed — restart the app to load the new version.")
+                    print("[avd] yt-dlp + gallery-dl refreshed — restart the app to load the new versions.")
                 else:
                     print("[avd] yt-dlp self-update skipped (offline or pip unavailable).")
             except Exception:  # noqa: BLE001 — pure nicety

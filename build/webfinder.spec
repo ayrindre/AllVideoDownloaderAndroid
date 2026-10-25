@@ -9,6 +9,14 @@ window. All paths resolve from SPECPATH so the build works from any cwd
 """
 import os
 
+# gallery-dl resolves its extractors dynamically (extractor/module.py scans
+# packages), so PyInstaller needs the whole tree, not just the modules we import.
+try:
+    from PyInstaller.utils.hooks import collect_submodules
+    gallery_hidden = collect_submodules("gallery_dl")
+except Exception:                                   # noqa: BLE001 — not installed yet
+    gallery_hidden = ["gallery_dl"]
+
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))          # noqa: F821
 web_dir = os.path.join(ROOT, "web")
 icon = os.path.join(SPECPATH, "icon.ico")
@@ -29,7 +37,7 @@ a = Analysis(
         "uvicorn.logging", "uvicorn.loops.asyncio", "uvicorn.protocols.http.h11_impl",
         "uvicorn.protocols.websockets.wsproto_impl", "websockets",
         "yt_dlp", "httpx", "h2", "curl_cffi",
-    ],
+    ] + gallery_hidden,
     hookspath=[],
     runtime_hooks=[],
     excludes=["tkinter", "PyQt5", "PySide6", "matplotlib", "test", "pytest"],

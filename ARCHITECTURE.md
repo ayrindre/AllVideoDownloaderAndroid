@@ -67,9 +67,33 @@ optional extraction patterns), `net` supplies browser-grade requests and the
 `curl_cffi` TLS-impersonation fallback. Adding a site never touches the
 analyzer; `GET /api/sites` and `tools/recipe_probe.py` expose the registry.
 
+## Instagram checker — `core/gallery.py` (+ `api`: `/api/gallery/*`)
+
+Profiles are a *walk*, not an extraction, so they use a different engine:
+**gallery-dl** in `-j` mode (JSON on stdout, nothing downloaded).
+
+```
+POST /api/gallery/scan {url, include[], limit}
+   → parse_source(): @handle | profile | /p/<code> | /reels/ | /stories/<u>/<id> | foreign site
+   → one gallery-dl run per requested tab (posts/reels/stories/highlights/tagged)
+     -j -o extractor.instagram.videos=merged -o ...audio=false -o ...previews=false
+        --post-range 1-<limit> [--cookies-from-browser <b>] [--proxy <p>] [--sleep-request <d>]
+   → parse_dump(): [2,"",post] / [3,url,file] / [-1,{error}] messages, in array OR jsonl form
+   → ScanTask (thread) streams per-tab status + items; UI polls GET /api/gallery/scan/{id}
+   → POST /api/gallery/download → manager.enqueue(kind="http", meta.headers/Referer)
+```
+
+Why one run per tab: failures stay isolated, each tab reports its own count, and
+partial results reach the UI while Instagram rate-limits the next page. The scan
+thread owns its subprocess, so `POST /api/gallery/scan/{id}/cancel` really kills it.
+Dumps are parsed defensively (arrays, JSON-lines, bare objects, `ytdl:` placeholders
+that are not files) because the user's own `gallery-dl.conf` may change the shape.
+
 ## Settings — `config.py`
 
-`~/.avd/settings.json`; one-shot migration from `~/.webfinder`; retired search keys
+`~/.avd/settings.json`; one-shot migration from `~/.webfinder`; `instagram_include`,
+`instagram_limit`, `instagram_delay` drive the checker's defaults (and
+`ytdlp_browser_cookies` is shared by both engines — one place to log in); retired search keys
 (`engines`, `result_limit`, `safe_search`, `resolve_pages`, `demo_mode`) are stripped
 on load — a stale file can't resurrect the removed module. `PUT /api/settings` accepts
 only keys present in the snapshot.

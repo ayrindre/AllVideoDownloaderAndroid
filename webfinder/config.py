@@ -33,6 +33,10 @@ DEFAULTS: dict[str, Any] = {
     "default_quality": "1080",           # "best" | 2160 | 1440 | 1080 | 720 | 480
     "ffmpeg_path": "",                   # manual override if not on PATH
     "ytdlp_browser_cookies": "",         # ""|chrome|edge|firefox|brave|chromium — defeats paywall/bot walls
+    # --- instagram checker (gallery-dl) ------------------------------------
+    "instagram_include": "posts,reels",  # posts,reels,stories,highlights,tagged
+    "instagram_limit": 30,               # newest N posts per tab (0 = everything)
+    "instagram_delay": "",               # "" = gallery-dl's own rate limit (6-12 s/request)
     # --- appearance ----------------------------------------------------------
     "accent": "violet",                  # violet | azure | magenta | mint
     "ambient_effects": True,

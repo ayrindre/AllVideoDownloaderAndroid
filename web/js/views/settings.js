@@ -25,7 +25,7 @@
     grid.innerHTML = "";
     $("#cfg-path").textContent = S.meta?.config_file || "~/.avd/settings.json";
 
-    grid.append(secDownloads(), secMedia(), secAppearance(), secSystem());
+    grid.append(secDownloads(), secMedia(), secInstagram(), secAppearance(), secSystem());
   }
 
   function card(title, sub, iconName, ...fields) {
@@ -74,7 +74,9 @@
     const ff = S.meta.system.ffmpeg;
     const caps = el("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", margin: "4px 0 14px" } },
       el("span", { class: `cap ${ff.available ? "ok" : "bad"}`, html: `<span class="dot"></span>FFmpeg ${ff.available ? "detected" : "not found"}` }),
-      el("span", { class: `cap ${S.meta.system.yt_dlp ? "ok" : "bad"}`, html: `<span class="dot"></span>yt-dlp ${S.meta.system.yt_dlp || "not installed"}` }));
+      el("span", { class: `cap ${S.meta.system.yt_dlp ? "ok" : "bad"}`, html: `<span class="dot"></span>yt-dlp ${S.meta.system.yt_dlp || "not installed"}` }),
+      el("span", { class: `cap ${S.meta.system.gallery_dl?.available ? "ok" : "bad"}`,
+        html: `<span class="dot"></span>gallery-dl ${S.meta.system.gallery_dl?.version || "not installed"}` }));
     const containerSel = selectOpt(["mp4", "mkv", "webm", "mov"], { mp4: "MP4 (best compatibility)", mkv: "MKV (max flexibility)", webm: "WebM", mov: "MOV" }, st.default_container, (v) => save({ default_container: v }));
     const qualitySel = selectOpt(["best", "2160", "1440", "1080", "720", "480"],
       { best: "Best available", 2160: "2160p (4K)", 1440: "1440p", 1080: "1080p (FHD)", 720: "720p", 480: "480p" },
@@ -85,12 +87,12 @@
       el("div", { class: "field" }, el("label", { class: "f-label" }, "Preferred container"), containerSel),
       el("div", { class: "field" }, el("label", { class: "f-label" }, "Default quality"), qualitySel),
       el("div", { class: "field" },
-        el("label", { class: "f-label" }, "Browser cookies source (yt-dlp)"),
+        el("label", { class: "f-label" }, "Browser cookies source (yt-dlp & gallery-dl)"),
         selectOpt(["", "chrome", "edge", "brave", "chromium", "firefox", "vivaldi"],
           { "": "None (anonymous)", chrome: "Chrome", edge: "Edge", brave: "Brave", chromium: "Chromium", firefox: "Firefox", vivaldi: "Vivaldi" },
           st.ytdlp_browser_cookies || "", (v) => save({ ytdlp_browser_cookies: v })),
         el("p", { style: { fontSize: "11.5px", color: "var(--text-3)", marginTop: 7, lineHeight: 1.5 } },
-          "When YouTube answers \u201cSign in to confirm you're not a bot\u201d, All Video Downloader reads your session cookies from that browser (locally, never uploaded) so extraction and downloads work on age/region-gated content. Windows: close Chrome fully after enabling, or it holds the cookie DB. Chrome 127+ on Windows encrypts it (App-Bound) — if downloads keep dying with “Could not copy Chrome cookie database”, firefox is the reliable source, or leave it empty: the app now retries every extraction and download without cookies automatically.")),
+          "When YouTube answers \u201cSign in to confirm you're not a bot\u201d, All Video Downloader reads your session cookies from that browser (locally, never uploaded) so extraction and downloads work on age/region-gated content. Windows: close Chrome fully after enabling, or it holds the cookie DB. Chrome 127+ on Windows encrypts it (App-Bound) — if downloads keep dying with “Could not copy Chrome cookie database”, firefox is the reliable source, or leave it empty: the app now retries every extraction and download without cookies automatically. The same choice is handed to gallery-dl, which is what makes the Instagram checker see logged-in profiles, stories and 18+ content.")),
       el("div", { class: "field" },
         el("label", { class: "f-label" }, "FFmpeg folder (optional)"),
         el("div", { class: "input-row" }, ffPath,
@@ -103,6 +105,47 @@
           } }, "Re-check")),
         el("p", { style: { fontSize: "11.5px", color: "var(--text-3)", marginTop: 7, lineHeight: 1.5 } },
           "Windows: ", el("code", {}, "winget install Gyan.FFmpeg"), " then restart All Video Downloader. Needed for .m3u8/.mpd capture and for merging separate audio+video streams.")));
+  }
+
+  /* ── instagram checker ──────────────────────────────────────────────────── */
+  function secInstagram() {
+    const st = S.settings;
+    const gal = S.meta.system.gallery_dl || {};
+    const targets = [["posts", "Posts"], ["reels", "Reels"], ["stories", "Stories"],
+      ["highlights", "Highlights"], ["tagged", "Tagged"]];
+    const chosen = new Set(String(st.instagram_include || "posts,reels").split(",").map((x) => x.trim()));
+    const chips = el("div", { class: "chip-set", style: { justifyContent: "flex-start" } });
+    const persist = () => save({ instagram_include: [...chosen].join(",") });
+    for (const [key, label] of targets) {
+      const chip = el("button", { class: `chip${chosen.has(key) ? " on" : ""}`, type: "button",
+        style: { "--chip-c": "#e1306c", height: "32px", padding: "0 12px" } }, label);
+      chip.addEventListener("click", () => {
+        if (chosen.has(key)) { if (chosen.size > 1) chosen.delete(key); }
+        else chosen.add(key);
+        chip.classList.toggle("on", chosen.has(key));
+        persist();
+      });
+      chips.append(chip);
+    }
+    const limitSel = selectOpt([10, 20, 30, 60, 120, 0],
+      { 10: "10 newest posts", 20: "20 newest", 30: "30 newest", 60: "60 newest", 120: "120 newest", 0: "Everything (slow)" },
+      Number(st.instagram_limit ?? 30), (v) => save({ instagram_limit: Number(v) }));
+    return card("Instagram checker", "Which profile tabs the gallery-dl walk covers by default.", "instagram",
+      el("div", { style: { display: "flex", gap: 8, flexWrap: "wrap", margin: "4px 0 14px" } },
+        el("span", { class: `cap ${gal.available ? "ok" : "bad"}`,
+          html: `<span class="dot"></span>gallery-dl ${gal.version || "not installed"}` })),
+      !gal.available ? el("div", { class: "notice warn", style: { marginBottom: 12 } },
+        el("span", { html: ICONS.svg("warning") }),
+        el("div", {}, "The checker needs gallery-dl: ", el("code", {}, gal.install_hint || "pip install gallery-dl"),
+          " — then restart All Video Downloader.")) : null,
+      el("div", { class: "field" }, el("label", { class: "f-label" }, "Tabs to walk"), chips),
+      el("div", { class: "field" }, el("label", { class: "f-label" }, "Post depth per tab"), limitSel),
+      el("div", { class: "field" },
+        el("label", { class: "f-label" }, "Request delay (optional)"),
+        el("input", { class: "input", placeholder: "empty = gallery-dl default (6–12 s, safest)", value: st.instagram_delay || "",
+          onchange: (e) => save({ instagram_delay: e.target.value.trim() }) }),
+        el("p", { style: { fontSize: "11.5px", color: "var(--text-3)", marginTop: 7, lineHeight: 1.5 } },
+          "Instagram throttles page fetches and logs out clients that hammer it. Lower the delay only if you accept that risk; stories and highlights always need the logged-in cookie source above.")));
   }
 
   /* ── appearance ─────────────────────────────────────────────────────────── */
@@ -159,6 +202,10 @@
         el("div", { class: "kv" }, el("span", { class: "k" }, "Platform"), el("span", { class: "v" }, m.platform)),
         el("div", { class: "kv" }, el("span", { class: "k" }, "Site recipes"),
           el("span", { class: "v" }, `${m.system.sites?.recipes || 0} sites · player-config engine`)),
+        el("div", { class: "kv" }, el("span", { class: "k" }, "gallery-dl"),
+          el("span", { class: "v" }, m.system.gallery_dl?.available
+            ? `${m.system.gallery_dl.version}${m.system.gallery_dl.exe ? " · " + m.system.gallery_dl.exe : " (module)"}`
+            : "not installed — the Instagram checker is disabled")),
         el("div", { class: "kv" }, el("span", { class: "k" }, "TLS impersonation"),
           el("span", { class: "v" }, m.system.tls_impersonation
             ? "on · curl_cffi (browser fingerprint for bot walls)"

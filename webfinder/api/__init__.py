@@ -47,14 +47,26 @@ class SettingsPatch(BaseModel):
     patch: dict
 
 
+class GalleryScanRequest(BaseModel):
+    url: str = ""
+    include: list[str] = Field(default_factory=list)   # posts|reels|stories|highlights|tagged
+    limit: int = 0                                     # 0 → saved default
+    cookies: str = ""                                  # "" → saved browser-cookie source
+
+
+class GalleryDownloadRequest(BaseModel):
+    items: list[dict] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Meta / system
 # ---------------------------------------------------------------------------
 @router.get("/meta")
 async def meta():
     ff = find_ffmpeg()
-    from ..core import net, sites, ytcli
+    from ..core import gallery, net, sites, ytcli
     engine = ytcli.detect()
+    gal = gallery.detect()
     ytdlp_version = engine["cli_version"] if engine["use_cli"] else (engine["module_version"] or None)
     return {
         "app": APP_NAME, "version": APP_VERSION,
@@ -66,6 +78,8 @@ async def meta():
                               "module_version": engine["module_version"],
                               "cli_version": engine["cli_version"]},
             "desktop": bool(os.environ.get("WEBFINDER_DESKTOP")),
+            "gallery_dl": {"available": gal["available"], "version": gal["version"],
+                           "exe": gal["exe"], "install_hint": gal["install_hint"]},
             "tls_impersonation": net.has_impersonation(),
             "sites": {"recipes": len(sites.RECIPES)},
         },
@@ -201,6 +215,77 @@ async def analyze_download(body: MediaDownloadRequest):
                           filename=plan.get("filename", ""), title=plan.get("title", ""),
                           file_type=plan.get("file_type", "link"), meta=plan.get("meta", {}))
     return {"job_id": job.id}
+
+
+# ---------------------------------------------------------------------------
+# Instagram / gallery-dl — profile enumeration ("Instagram checker" tab)
+# ---------------------------------------------------------------------------
+@router.get("/gallery/engine")
+async def gallery_engine():
+    """Is gallery-dl usable, which version, which profile tabs exist."""
+    from ..core import gallery
+    return gallery.gallery_engine_info()
+
+
+@router.post("/gallery/scan")
+async def gallery_scan(body: GalleryScanRequest):
+    """Start a profile scan (posts/reels/stories/highlights/tagged).
+
+    Returns immediately with a task id — Instagram rate-limits page fetches, so
+    the UI polls ``GET /gallery/scan/{id}`` for status, per-tab counts and the
+    items found so far.
+    """
+    from ..core import gallery
+    try:
+        return {"scan": gallery.start_scan(body.url, include=body.include,
+                                          limit=body.limit, cookie_source=body.cookies)}
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc)) from exc
+
+
+@router.get("/gallery/scan/{scan_id}")
+async def gallery_scan_status(scan_id: str):
+    from ..core import gallery
+    snap = gallery.get_scan(scan_id)
+    if not snap:
+        raise HTTPException(404, "Unknown scan id")
+    return {"scan": snap}
+
+
+@router.get("/gallery/scans")
+async def gallery_scans():
+    """Recent scans (newest first) — lets the tab restore after a reload."""
+    from ..core import gallery
+    return {"scans": gallery.list_scans()}
+
+
+@router.post("/gallery/scan/{scan_id}/cancel")
+async def gallery_scan_cancel(scan_id: str):
+    from ..core import gallery
+    return {"ok": gallery.cancel_scan(scan_id)}
+
+
+@router.post("/gallery/download")
+async def gallery_download(body: GalleryDownloadRequest):
+    """Enqueue selected items into the normal Download Manager."""
+    from ..core import gallery
+    from ..core import filekind as fk
+    queued = []
+    for item in body.items[:500]:
+        url = str(item.get("url") or "").strip()
+        if not url.startswith(("http://", "https://")):
+            continue
+        plan = gallery.to_job(item)
+        job = manager.enqueue(url=url, kind=plan["kind"],
+                              filename=plan["filename"] or fk.guess_filename(url),
+                              title=plan["title"], file_type=plan["file_type"],
+                              meta=plan["meta"])
+        queued.append(job.id)
+    if not queued:
+        raise HTTPException(400, "Nothing to download — select at least one item.")
+    return {"queued": len(queued), "job_ids": queued}
 
 
 # ---------------------------------------------------------------------------

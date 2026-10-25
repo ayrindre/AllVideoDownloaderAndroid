@@ -15,6 +15,7 @@
     exit: '<path d="M9 4H6.5A2.5 2.5 0 0 0 4 6.5v11A2.5 2.5 0 0 0 6.5 20H9"/><path d="M15 8l4 4-4 4M19 12H9"/>',
     panelLeft: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9.5 4v16"/>',
     video: '<rect x="2" y="6" width="13" height="12" rx="2.5"/><path d="m15 10 6-3.5v11L15 14z"/>',
+    instagram: '<rect x="3" y="3" width="18" height="18" rx="5.2"/><circle cx="12" cy="12" r="4.1"/><circle cx="17.2" cy="6.8" r="1.1" fill="currentColor" stroke="none"/>',
     image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="9.5" r="1.6"/><path d="m4.5 18 5-5.5 3 3 3.5-4 4.5 5"/>',
     magnet: '<path d="M6 3v8a6 6 0 0 0 12 0V3"/><path d="M2 3h4v5H2zM18 3h4v5h-4z"/>',
     torrent: '<path d="M12 3v10"/><path d="m8.5 9.5 3.5 3.5 3.5-3.5"/><path d="M5 15c1.5 2.5 4 4 7 4s5.5-1.5 7-4"/>',

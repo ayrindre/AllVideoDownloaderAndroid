@@ -77,6 +77,29 @@
         </div>
       </section>
 
+      <!-- =============== INSTAGRAM CHECKER (gallery-dl) =============== -->
+      <section class="view" id="view-instagram" data-title="Instagram checker">
+        <div class="page-head head-inline">
+          <div>
+            <h1 class="page-title">Instagram <span class="grad-text">checker</span></h1>
+            <p class="page-sub">Paste a profile link or <code>@handle</code> — the account's posts, reels, stories and highlights are listed by <b>gallery-dl</b> (any other gallery-dl site works too), then downloaded by the normal manager.</p>
+          </div>
+          <div class="head-actions" id="ig-engine-badge"></div>
+        </div>
+
+        <div class="dock" style="max-width:none">
+          <div class="paste-bar">
+            <span class="pb-icon" id="ig-icon"></span>
+            <input type="text" id="ig-url" spellcheck="false" placeholder="https://www.instagram.com/username/   ·   @username   ·   https://www.instagram.com/p/SHORTCODE/" aria-label="Instagram profile URL" />
+            <button class="btn btn-ghost btn-sm" id="ig-paste" title="Paste from clipboard">Paste</button>
+            <button class="btn btn-primary" id="ig-scan"><span class="btn-ico"></span><span>Check profile</span></button>
+          </div>
+          <div class="ig-options" id="ig-options"></div>
+        </div>
+
+        <div id="ig-stage" class="ig-stage"></div>
+      </section>
+
       <!-- =============== DOWNLOAD MANAGER =============== -->
       <section class="view" id="view-downloads" data-title="Downloads">
         <div class="page-head head-inline">
@@ -148,6 +171,7 @@
 <script src="/static/js/state.js"></script>
 <script src="/static/js/views/direct.js"></script>
 <script src="/static/js/views/downloads.js"></script>
+<script src="/static/js/views/instagram.js"></script>
 <script src="/static/js/views/settings.js"></script>
 <script src="/static/js/app.js"></script>
 </body>
