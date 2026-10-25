@@ -97,6 +97,31 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001 — never let the helper break launch
         print(f"[webfinder] ffmpeg bootstrap skipped: {exc}")
 
+    # Keep yt-dlp fresh: YouTube rewrites its anti-bot rules weekly and a stale
+    # local copy is the #1 cause of "only 480p offered" / "Sign in to confirm
+    # you're not a bot". One silent pip upgrade per day, in the background.
+    if not os.environ.get("WEBFINDER_NO_SELFUPDATE"):
+        import threading
+
+        def _selfupdate() -> None:
+            try:
+                stamp = Path(__file__).resolve().parent / ".wf-ytdlp-updated"
+                if stamp.exists() and time.time() - stamp.stat().st_mtime < 86400:
+                    return
+                import subprocess as _sp
+                r = _sp.run([sys.executable, "-m", "pip", "install", "-U", "--quiet",
+                             "--disable-pip-version-check", "yt-dlp"],
+                            capture_output=True, text=True, timeout=240)
+                if r.returncode == 0:
+                    stamp.touch()
+                    print("[webfinder] yt-dlp refreshed — restart the app to load the new version.")
+                else:
+                    print("[webfinder] yt-dlp self-update skipped (offline or pip unavailable).")
+            except Exception:  # noqa: BLE001 — pure nicety
+                pass
+
+        threading.Thread(target=_selfupdate, daemon=True).start()
+
     if os.environ.get("WEBFINDER_PORT_TAKEOVER"):        # launched by run.bat wrapper
         args.port = int(os.environ["WEBFINDER_PORT_TAKEOVER"])
 

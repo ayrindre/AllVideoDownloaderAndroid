@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import time
 import re
 from dataclasses import dataclass, field
 from html import unescape
@@ -328,12 +329,161 @@ async def search_mojeek(client: httpx.AsyncClient, query: str, limit: int, safe:
             break
     return out
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  New engines — chosen to dodge BOTH Google's bot wall and ISP-level blocks:
+#  Startpage serves Google's index from a European domain, Brave/Ecosia run
+#  independent/Bing-backed stacks, Marginalia indexes the deep & uncensored
+#  web (file directories, indie sites) that the majors filtered out.
+# ═══════════════════════════════════════════════════════════════════════════
+async def search_startpage(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
+    params = {"query": query, "cat": "web", "language": "english"}
+    if not safe:
+        params["safe"] = "off"
+    r = await client.get("https://www.startpage.com/sp/search", params=params)
+    low = r.text[:4000].lower()
+    if r.status_code in (403, 429) or "areyouhuman" in str(r.url) or "captcha" in low:
+        raise RuntimeError("Startpage asked for human verification — wait a minute or add a proxy")
+    r.raise_for_status()
+    out: list[dict] = []
+    seen: set[str] = set()
+    patterns = (
+        r'<a[^>]*class="[^"]*(?:result-link|w-gl__result-url)[^"]*"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+        r'href="(https?://(?!www\.startpage|startpage\.com)[^"]+)"[^>]*class="[^"]*title[^"]*"[^>]*>(.*?)</',
+    )
+    for pat in patterns:
+        for m in re.finditer(pat, r.text, re.S):
+            url = _strip_redirect(unescape(m.group(1)))
+            if not url.startswith("http") or url in seen or "://www.startpage.com" in url or "://startpage.com" in url:
+                continue
+            seen.add(url)
+            out.append(_mk_result(url, _clean(m.group(2)), ""))
+            if len(out) >= limit:
+                break
+        if len(out) >= limit:
+            break
+    if not out:
+        raise RuntimeError("Startpage markup changed or returned an empty shell")
+    return out
+
+
+async def search_brave(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
+    r = await client.get("https://search.brave.com/search", params={"q": query, "source": "web"})
+    if r.status_code in (403, 429):
+        raise RuntimeError(f"Brave rate-limited this IP ({r.status_code}) — retry in a minute")
+    r.raise_for_status()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for m in re.finditer(r'<a[^>]*class="[^"]*(?:h snippet-title|result-header|heading)[^"]*"[^>]*href="(https?://[^"]+)"[^>]*>(.*?)</a>', r.text, re.S):
+        url = unescape(m.group(1))
+        if "brave.com" in urlparse(url).netloc or url in seen:
+            continue
+        title = _clean(m.group(2))
+        if not title:
+            continue
+        seen.add(url)
+        out.append(_mk_result(url, title, ""))
+        if len(out) >= limit:
+            break
+    if not out:
+        # looser pass: any external anchor inside a results block
+        for m in re.finditer(r'href="(https?://(?!search\.brave\.com|api\.brave\.com)[^"]+)"[^>]*>\s*<[^>]*>([^<]{12,150})</', r.text):
+            url = unescape(m.group(1))
+            if url in seen:
+                continue
+            seen.add(url)
+            out.append(_mk_result(url, _clean(m.group(2)), ""))
+            if len(out) >= limit:
+                break
+    if not out:
+        raise RuntimeError("Brave markup changed or served a challenge")
+    return out
+
+
+async def search_ecosia(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
+    r = await client.get("https://www.ecosia.org/search", params={"q": query})
+    if r.status_code in (403, 429):
+        raise RuntimeError("Ecosia is blocking this client (403/429)")
+    r.raise_for_status()
+    out: list[dict] = []
+    seen: set[str] = set()
+    for m in re.finditer(r'data-mdurl="([^"]+)"', r.text):
+        url = unescape(m.group(1))
+        if not url.startswith("http") or url in seen:
+            continue
+        # title lives in the following ~900 chars
+        tail = r.text[m.end():m.end() + 900]
+        t = re.search(r'<div[^>]*class="[^"]*(?:result__title|title)[^"]*"[^>]*>(.*?)</div>', tail, re.S) \
+            or re.search(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*>(.*?)</a>', tail, re.S)
+        title = _clean(t.group(1)) if t else urlparse(url).path.strip("/").replace("/", " · ")[:80]
+        seen.add(url)
+        out.append(_mk_result(url, title, ""))
+        if len(out) >= limit:
+            break
+    if not out:
+        raise RuntimeError("Ecosia markup changed (no data-mdurl anchors)")
+    return out
+
+
+async def search_marginalia(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
+    """Marginalia — indie, uncensored index; superb for file directories the
+    majors have dropped from their indexes."""
+    r = await client.get("https://old-search.marginalia.nu/search",
+                         params={"db": "default", "searchterm": query})
+    r.raise_for_status()
+    out: list[dict] = []
+    seen: set[str] = set()
+
+    def _unwrap(href: str) -> str:
+        href = unescape(href)
+        if "redirect" in href and "url=" in href:
+            q = parse_qs(urlparse(href).query).get("url")
+            if q:
+                return q[0]
+        return href
+
+    for m in re.finditer(r'<a[^>]*href="([^"]+)"[^>]*>\s*(?:<div[^>]*class="result-title"[^>]*>)?(.*?)</a>', r.text, re.S):
+        url = _unwrap(m.group(1))
+        if not url.startswith("http") or "marginalia.nu" in urlparse(url).netloc or url in seen:
+            continue
+        title = _clean(re.sub(r"<[^>]+>", " ", m.group(2)))
+        if not title:
+            title = urlparse(url).netloc + urlparse(url).path[:40]
+        seen.add(url)
+        out.append(_mk_result(url, title[:160], ""))
+        if len(out) >= limit:
+            break
+    if not out:
+        raise RuntimeError("Marginalia markup changed (or the query hit its rate budget)")
+    return out
+
+
+# ── polite self-preservation: engines that just blocked us get a short
+#    cooldown so rapid re-searches don't deepen the flag (and the user sees
+#    WHY they're missing, not a silent zero) ────────────────────────────────
+_BLOCKY_RX = re.compile(r"429|403|captcha|too many|rate|anomaly|bot|challenge|human", re.I)
+_cooldown: dict[str, float] = {}
+
+
+def _note_block(name: str, err: str) -> None:
+    if _BLOCKY_RX.search(err or ""):
+        _cooldown[name] = time.time() + 40.0
+
+
+def cooling_left(name: str) -> int:
+    left = _cooldown.get(name, 0.0) - time.time()
+    return int(left) if left > 0 else 0
+
+
 ENGINES: dict[str, Callable] = {
     "google": search_google,
     "bing": search_bing,
     "duckduckgo": search_duckduckgo,
     "yandex": search_yandex,
     "mojeek": search_mojeek,
+    "startpage": search_startpage,
+    "brave": search_brave,
+    "ecosia": search_ecosia,
+    "marginalia": search_marginalia,
 }
 
 ENGINE_META = {
@@ -342,6 +492,10 @@ ENGINE_META = {
     "duckduckgo": {"label": "DuckDuckGo", "color": "#DE5833", "reliability": "high"},
     "yandex": {"label": "Yandex", "color": "#FC3F1D", "reliability": "low (captcha) — pair with proxy"},
     "mojeek": {"label": "Mojeek", "color": "#86B566", "reliability": "medium"},
+    "startpage": {"label": "Startpage", "color": "#1A73E8", "reliability": "high — Google results, unblocked domain"},
+    "brave": {"label": "Brave", "color": "#FB542B", "reliability": "medium (own index)"},
+    "ecosia": {"label": "Ecosia", "color": "#5AA02D", "reliability": "medium (Bing-backed)"},
+    "marginalia": {"label": "Marginalia", "color": "#C3E04A", "reliability": "high (uncensored, slow)"},
 }
 
 
@@ -356,20 +510,30 @@ async def run_search(
     """Fan-out the same dork-augmented query to every enabled engine."""
     full_query = dk.build_query(query, types)
 
-    async def _guarded(fn: Callable, client: httpx.AsyncClient) -> EngineResponse:
-        loop = asyncio.get_running_loop()
+    loop = asyncio.get_running_loop()
+
+    async def _guarded(fn: Callable, client: httpx.AsyncClient, stagger: float) -> EngineResponse:
         t0 = loop.time()
         name = fn.__name__.replace("search_", "")
+        wait = cooling_left(name)
+        if wait:
+            return EngineResponse(name, False, f"cooling down {wait}s after a block — searching too fast?", 0, [])
+        if stagger:
+            await asyncio.sleep(stagger)   # human-ish pacing beats rate limiters
         try:
             res = await fn(client, full_query, limit, safe)
             return EngineResponse(name, True, "", int((loop.time() - t0) * 1000), res)
         except Exception as exc:  # noqa: BLE001
-            return EngineResponse(name, False, str(exc)[:200], int((loop.time() - t0) * 1000), [])
+            err = str(exc)[:200]
+            _note_block(name, err)
+            return EngineResponse(name, False, err, int((loop.time() - t0) * 1000), [])
 
-    tasks = []
     async with _base_client(proxy) as client:
+        tasks = []
+        idx = 0
         for name in engine_names:
             fn = ENGINES.get(name)
             if fn:
-                tasks.append(asyncio.create_task(_guarded(fn, client)))
+                tasks.append(asyncio.create_task(_guarded(fn, client, min(idx * 0.22, 0.9))))
+                idx += 1
         return list(await asyncio.gather(*tasks))

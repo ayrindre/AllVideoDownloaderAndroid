@@ -20,6 +20,7 @@ class Resp:
     def __init__(self, text, status=200, headers=None):
         self.text, self.status_code = text, status
         self.headers = headers or {"content-type": "application/json"}
+        self.url = "https://engine.example/search"
     def json(self): return json.loads(self.text)
     def raise_for_status(self):
         if self.status_code >= 400: raise RuntimeError(f"HTTP {self.status_code}")
@@ -249,3 +250,259 @@ assert not v._FILE_EXT_RX["video"].search("https://dictionary.example.org/langdi
 assert v._PLAYABLE_HOST_RX.search("https://www.youtube.com/watch?v=abc123")
 assert v._FILE_EXT_RX["app"].search("https://github.com/o/r/releases/download/v/Tool-setup.exe")
 print("✓ gates: archive + video + app extension regexes behave (LinkedIn-style junk never passes)")
+
+
+# ═══ ROUND 8: new web engines ══════════════════════════════════════════════
+from webfinder import engines as E
+
+SP = """<html><ol id='results'>
+<li><a class="result-link" href="https://mirror.example/winamp/winamp.zip">Winamp zip mirror</a></li>
+<li><a class="w-gl__result-url" href="https://files.zone/winamp-installer.exe">installer</a></li>
+<li><a class="result-link" href="https://www.startpage.com/adnqs?x=1">ad</a></li>
+</ol></html>"""
+rows = asyncio.run(E.search_startpage(FakeClient({"startpage.com": Resp(SP, headers={"content-type": "text/html"})}), "q", 10))
+assert [r["url"] for r in rows] == ["https://mirror.example/winamp/winamp.zip", "https://files.zone/winamp-installer.exe"], rows
+print("✓ startpage parser: results extracted, startpage-internal links dropped")
+
+BR = '<html><div id="results"><a class="h snippet-title" href="https://a.example/x"><div>Title One</div></a><a class="h snippet-title" href="https://b.example/y"><div>Title Two</div></a></div></html>'
+rows = asyncio.run(E.search_brave(FakeClient({"brave.com": Resp(BR, headers={"content-type": "text/html"})}), "q", 10))
+assert len(rows) == 2 and rows[0]["title"] == "Title One"
+print("✓ brave parser: web anchors only")
+
+EC = '<html><div class="result"><a data-mdurl="https://deep.example/file.mp4" href="/out/1"><div class="result__title"><span>Song</span></div></a></div></html>'
+rows = asyncio.run(E.search_ecosia(FakeClient({"ecosia.org": Resp(EC, headers={"content-type": "text/html"})}), "q", 10))
+assert len(rows) == 1 and rows[0]["url"] == "https://deep.example/file.mp4" and rows[0]["title"] == "Song"
+print("✓ ecosia parser: data-mdurl + title block")
+
+MG = ('<html><div class="main"><a class="result-link" href="https://old-search.marginalia.nu/redirect?url=https%3A%2F%2Farchive.ssite.org%2Fpub%2Fwinamp.zip&ctx=1">'
+      '<div class="result-title">Winamp Archive</div></a></div></html>')
+rows = asyncio.run(E.search_marginalia(FakeClient({"marginalia": Resp(MG, headers={"content-type": "text/html"})}), "q", 10))
+assert len(rows) == 1 and rows[0]["url"] == "https://archive.ssite.org/pub/winamp.zip"
+print("✓ marginalia parser: redirect?url= unwrapped")
+
+# cooldown bookkeeping
+E._note_block("mojeek", "Mojeek anti-bot (403)")
+assert E.cooling_left("mojeek") >= 39
+E._note_block("bing", "some parse failure")
+assert E.cooling_left("bing") == 0
+print("✓ engine cooldown: blocks cool down, parse errors don't")
+
+# ═══ deepscan rescue inside the video dork fallback ════════════════════════
+from webfinder.core import media as M
+
+class PageClient(FakeClient):
+    pass
+
+_orig_engines = dict(E.ENGINES)
+async def _fake_startpage(client, q, lim, safe=False):
+    return [{"url": "https://blog.example/winamp-review", "title": "Review", "snippet": "", "domain": "blog.example"}]
+async def _raise(client, q, lim, safe=False):
+    raise RuntimeError("down")
+E.ENGINES.update({"startpage": _fake_startpage})
+for n in ("google", "bing", "brave", "duckduckgo", "ecosia", "mojeek", "marginalia"):
+    if n in E.ENGINES and n != "startpage":
+        E.ENGINES[n] = _raise if n in ("google",) else E.ENGINES[n]
+_orig_scan = M.scan_page
+async def _fake_scan(url, limit=14, wanted=None):
+    import re as _re
+    cand = {"url": "https://blog.example/media/winamp-clip.mp4", "filename": "winamp-clip.mp4",
+            "file_type": "video", "size_bytes": 12345678}
+    if wanted is not None and not wanted.search(cand["url"]):
+        return []
+    return [cand]
+M.scan_page = _fake_scan
+try:
+    rows = asyncio.run(v._dork_files_fallback(None, "winamp", "video", 10, False))
+finally:
+    M.scan_page = _orig_scan
+    E.ENGINES.clear(); E.ENGINES.update(_orig_engines)
+assert len(rows) == 1 and rows[0]["engine"] == "deepscan" and rows[0]["is_direct"], rows
+assert rows[0]["page"] == "https://blog.example/winamp-review"      # provenance kept
+print("✓ deepscan rescue: review page → harvested .mp4 with page provenance")
+
+# ═══ AUDIO: ccmixter + IA-audio kinds ══════════════════════════════════════
+CC = json.dumps({"items": [{
+    "title": "Sunny Cut", "itemurl": "https://ccmixter.org/files/u1/999",
+    "user": {"name": "DJ One"}, "albumImage": "https://ccmixter.org/img/a.png",
+    "licenseName": "Attribution", "duration": 195.6,
+    "fileinfo": {"mp3": {"download_url": "https://ccmixter.org/content/u1/999.mp3", "size": "3100", "duration": 195.6}}}]}
+)
+rows = asyncio.run(v._ccmixter(FakeClient({"api.ccmixter.org": Resp(CC)}), "sunny", 10))
+assert len(rows) == 1 and rows[0]["url"].endswith(".mp3")
+assert rows[0]["size_bytes"] == 3100 * 1024 and rows[0]["duration"] == 195
+print("✓ ccmixter: direct mp3 + KB→bytes + duration int")
+
+IAX = json.dumps({"server": "ia900000.us.archive.org", "files": [
+    {"name": "show01.flac", "size": "500000000"}, {"name": "show01.mp3", "size": "90000000"},
+    {"name": "book.pdf", "size": "3000000"}]})
+row = asyncio.run(v._ia_resolve(FakeClient({"archive.org/metadata": Resp(IAX)}), "show01", "Live Show",
+                                kinds=v.AUDIO_KINDS))
+assert row["url"].endswith("/show01.mp3"), row           # mp3 ranks first in AUDIO_KINDS
+print("✓ ia audio resolve: file picked from AUDIO_KINDS:", row["url"].rsplit("/", 1)[-1])
+
+# ═══ ytdlp picker: real format ids ride through the selector ════════════════
+import types
+fake_yt = types.ModuleType("yt_dlp")
+INFO = {"title": "t", "extractor_key": "Youtube", "formats": [
+    {"format_id": "399", "ext": "mp4", "vcodec": "av01.0.19M.08", "acodec": "none", "height": 2160, "tbr": 9000, "fps": 60},
+    {"format_id": "299", "ext": "mp4", "vcodec": "avc1.640028", "acodec": "none", "height": 1080, "tbr": 4000},
+    {"format_id": "137", "ext": "mp4", "vcodec": "avc1.640028", "acodec": "none", "height": 1080, "tbr": 6500},
+    {"format_id": "140", "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 129},
+    {"format_id": "18", "ext": "mp4", "vcodec": "avc1.42001E", "acodec": "mp4a.40.2", "height": 360, "tbr": 600},
+]}
+class _YDL:
+    def __init__(self, opts): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def extract_info(self, url, download=False): return INFO
+fake_yt.YoutubeDL = _YDL
+sys.modules.setdefault("yt_dlp_bak", sys.modules.get("yt_dlp"))
+sys.modules["yt_dlp"] = fake_yt
+media_obj, err = M._ytdlp_extract("https://youtu.be/x")
+sel = {f["height"]: f["format"] for f in media_obj["formats"]}
+assert "137+140/18" in sel[1080] or "137+140" in sel[1080], sel
+assert "399+140" in sel[2160], sel
+print("✓ picker format strings use real ids:", sel[1080], "|", sel[2160])
+
+# ═══ cancel removes the job (and a dead worker can't revive it) ════════════
+from webfinder.core.downloader import DownloadManager, DownloadJob
+events = []
+m = DownloadManager.__new__(DownloadManager)
+m.jobs, m.order, m._emit = {}, [], (lambda evt: events.append(evt))
+j = DownloadJob(url="https://x/a.bin", kind="sim", title="a"); j.id = "j1"
+m.jobs["j1"] = j; m.order.append("j1")
+assert m.cancel("j1") is True
+assert "j1" not in m.jobs, "queued job must vanish on cancel"
+assert any(e["type"] == "jobs.list" for e in events)
+j.publish_ref = None
+m.publish(j)                                    # zombie publish after removal → silent
+assert not any(e["type"] == "job.update" and e["payload"].get("id") == "j1" for e in events[1:]), "revived!"
+print("✓ cancel semantics: queued-cancel removes row; removed job can't republish")
+
+
+# ═══ ROUND 8: new web engines ══════════════════════════════════════════════
+from webfinder import engines as E
+
+SP = """<html><ol id='results'>
+<li><a class="result-link" href="https://mirror.example/winamp/winamp.zip">Winamp zip mirror</a></li>
+<li><a class="w-gl__result-url" href="https://files.zone/winamp-installer.exe">installer</a></li>
+<li><a class="result-link" href="https://www.startpage.com/adnqs?x=1">ad</a></li>
+</ol></html>"""
+rows = asyncio.run(E.search_startpage(FakeClient({"startpage.com": Resp(SP, headers={"content-type": "text/html"})}), "q", 10))
+assert [r["url"] for r in rows] == ["https://mirror.example/winamp/winamp.zip", "https://files.zone/winamp-installer.exe"], rows
+print("✓ startpage parser: results extracted, startpage-internal links dropped")
+
+BR = '<html><div id="results"><a class="h snippet-title" href="https://a.example/x"><div>Title One</div></a><a class="h snippet-title" href="https://b.example/y"><div>Title Two</div></a></div></html>'
+rows = asyncio.run(E.search_brave(FakeClient({"brave.com": Resp(BR, headers={"content-type": "text/html"})}), "q", 10))
+assert len(rows) == 2 and rows[0]["title"] == "Title One"
+print("✓ brave parser: web anchors only")
+
+EC = '<html><div class="result"><a data-mdurl="https://deep.example/file.mp4" href="/out/1"><div class="result__title"><span>Song</span></div></a></div></html>'
+rows = asyncio.run(E.search_ecosia(FakeClient({"ecosia.org": Resp(EC, headers={"content-type": "text/html"})}), "q", 10))
+assert len(rows) == 1 and rows[0]["url"] == "https://deep.example/file.mp4" and rows[0]["title"] == "Song"
+print("✓ ecosia parser: data-mdurl + title block")
+
+MG = ('<html><div class="main"><a class="result-link" href="https://old-search.marginalia.nu/redirect?url=https%3A%2F%2Farchive.ssite.org%2Fpub%2Fwinamp.zip&ctx=1">'
+      '<div class="result-title">Winamp Archive</div></a></div></html>')
+rows = asyncio.run(E.search_marginalia(FakeClient({"marginalia": Resp(MG, headers={"content-type": "text/html"})}), "q", 10))
+assert len(rows) == 1 and rows[0]["url"] == "https://archive.ssite.org/pub/winamp.zip"
+print("✓ marginalia parser: redirect?url= unwrapped")
+
+# cooldown bookkeeping
+E._note_block("mojeek", "Mojeek anti-bot (403)")
+assert E.cooling_left("mojeek") >= 39
+E._note_block("bing", "some parse failure")
+assert E.cooling_left("bing") == 0
+print("✓ engine cooldown: blocks cool down, parse errors don't")
+
+# ═══ deepscan rescue inside the video dork fallback ════════════════════════
+from webfinder.core import media as M
+
+class PageClient(FakeClient):
+    pass
+
+_orig_engines = dict(E.ENGINES)
+async def _fake_startpage(client, q, lim, safe=False):
+    return [{"url": "https://blog.example/winamp-review", "title": "Review", "snippet": "", "domain": "blog.example"}]
+async def _raise(client, q, lim, safe=False):
+    raise RuntimeError("down")
+E.ENGINES.update({"startpage": _fake_startpage})
+for n in ("google", "bing", "brave", "duckduckgo", "ecosia", "mojeek", "marginalia"):
+    if n in E.ENGINES and n != "startpage":
+        E.ENGINES[n] = _raise if n in ("google",) else E.ENGINES[n]
+_orig_scan = M.scan_page
+async def _fake_scan(url, limit=14, wanted=None):
+    import re as _re
+    cand = {"url": "https://blog.example/media/winamp-clip.mp4", "filename": "winamp-clip.mp4",
+            "file_type": "video", "size_bytes": 12345678}
+    if wanted is not None and not wanted.search(cand["url"]):
+        return []
+    return [cand]
+M.scan_page = _fake_scan
+try:
+    rows = asyncio.run(v._dork_files_fallback(None, "winamp", "video", 10, False))
+finally:
+    M.scan_page = _orig_scan
+    E.ENGINES.clear(); E.ENGINES.update(_orig_engines)
+assert len(rows) == 1 and rows[0]["engine"] == "deepscan" and rows[0]["is_direct"], rows
+assert rows[0]["page"] == "https://blog.example/winamp-review"      # provenance kept
+print("✓ deepscan rescue: review page → harvested .mp4 with page provenance")
+
+# ═══ AUDIO: ccmixter + IA-audio kinds ══════════════════════════════════════
+CC = json.dumps({"items": [{
+    "title": "Sunny Cut", "itemurl": "https://ccmixter.org/files/u1/999",
+    "user": {"name": "DJ One"}, "albumImage": "https://ccmixter.org/img/a.png",
+    "licenseName": "Attribution", "duration": 195.6,
+    "fileinfo": {"mp3": {"download_url": "https://ccmixter.org/content/u1/999.mp3", "size": "3100", "duration": 195.6}}}]}
+)
+rows = asyncio.run(v._ccmixter(FakeClient({"api.ccmixter.org": Resp(CC)}), "sunny", 10))
+assert len(rows) == 1 and rows[0]["url"].endswith(".mp3")
+assert rows[0]["size_bytes"] == 3100 * 1024 and rows[0]["duration"] == 195
+print("✓ ccmixter: direct mp3 + KB→bytes + duration int")
+
+IAX = json.dumps({"server": "ia900000.us.archive.org", "files": [
+    {"name": "show01.flac", "size": "500000000"}, {"name": "show01.mp3", "size": "90000000"},
+    {"name": "book.pdf", "size": "3000000"}]})
+row = asyncio.run(v._ia_resolve(FakeClient({"archive.org/metadata": Resp(IAX)}), "show01", "Live Show",
+                                kinds=v.AUDIO_KINDS))
+assert row["url"].endswith("/show01.mp3"), row           # mp3 ranks first in AUDIO_KINDS
+print("✓ ia audio resolve: file picked from AUDIO_KINDS:", row["url"].rsplit("/", 1)[-1])
+
+# ═══ ytdlp picker: real format ids ride through the selector ════════════════
+import types
+fake_yt = types.ModuleType("yt_dlp")
+INFO = {"title": "t", "extractor_key": "Youtube", "formats": [
+    {"format_id": "399", "ext": "mp4", "vcodec": "av01.0.19M.08", "acodec": "none", "height": 2160, "tbr": 9000, "fps": 60},
+    {"format_id": "299", "ext": "mp4", "vcodec": "avc1.640028", "acodec": "none", "height": 1080, "tbr": 4000},
+    {"format_id": "137", "ext": "mp4", "vcodec": "avc1.640028", "acodec": "none", "height": 1080, "tbr": 6500},
+    {"format_id": "140", "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 129},
+    {"format_id": "18", "ext": "mp4", "vcodec": "avc1.42001E", "acodec": "mp4a.40.2", "height": 360, "tbr": 600},
+]}
+class _YDL:
+    def __init__(self, opts): pass
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def extract_info(self, url, download=False): return INFO
+fake_yt.YoutubeDL = _YDL
+sys.modules.setdefault("yt_dlp_bak", sys.modules.get("yt_dlp"))
+sys.modules["yt_dlp"] = fake_yt
+media_obj, err = M._ytdlp_extract("https://youtu.be/x")
+sel = {f["height"]: f["format"] for f in media_obj["formats"]}
+assert "137+140/18" in sel[1080] or "137+140" in sel[1080], sel
+assert "399+140" in sel[2160], sel
+print("✓ picker format strings use real ids:", sel[1080], "|", sel[2160])
+
+# ═══ cancel removes the job (and a dead worker can't revive it) ════════════
+from webfinder.core.downloader import DownloadManager, DownloadJob
+events = []
+m = DownloadManager.__new__(DownloadManager)
+m.jobs, m.order, m._emit = {}, [], (lambda evt: events.append(evt))
+j = DownloadJob(url="https://x/a.bin", kind="sim", title="a"); j.id = "j1"
+m.jobs["j1"] = j; m.order.append("j1")
+assert m.cancel("j1") is True
+assert "j1" not in m.jobs, "queued job must vanish on cancel"
+assert any(e["type"] == "jobs.list" for e in events)
+j.publish_ref = None
+m.publish(j)                                    # zombie publish after removal → silent
+assert not any(e["type"] == "job.update" and e["payload"].get("id") == "j1" for e in events[1:]), "revived!"
+print("✓ cancel semantics: queued-cancel removes row; removed job can't republish")

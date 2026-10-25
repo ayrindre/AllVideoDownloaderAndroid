@@ -217,8 +217,10 @@ def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
             key = 0
             entry = formats.setdefault(key, {"height": 0, "label": "Audio only",
                                              "exts": set(), "has_video": False,
-                                             "abr": f.get("abr") or 0, "fps": 0})
+                                             "abr": f.get("abr") or 0, "fps": 0,
+                                             "aud_ids": []})
             entry["exts"].add(f.get("ext") or "m4a")
+            entry["aud_ids"].append((f.get("abr") or 0, f.get("format_id")))
             continue
         if not h:
             continue
@@ -228,8 +230,11 @@ def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
         entry = formats.setdefault(nearest, {"height": nearest,
                                              "label": f"{nearest}p{badge}",
                                              "exts": set(), "has_video": True,
-                                             "fps": f.get("fps") or 0})
+                                             "fps": f.get("fps") or 0,
+                                             "vid_ids": [], "mux_ids": [], "aud_ids": []})
         entry["exts"].add(f.get("ext") or "mp4")
+        (entry["mux_ids"] if acodec != "none" else entry["vid_ids"]).append(
+            (f.get("tbr") or 0, f.get("format_id")))
         if acodec != "none":
             entry["muxed"] = True
 
@@ -237,12 +242,32 @@ def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
     for q in _QUALITY_ORDER:
         if q in formats:
             e = formats[q]
+            # Real format IDs first ("137+140/…"): exact stream choice survives
+            # even when generic selectors resolve to a capped ladder.
+            best_v = max((t for t, i in (e.get("vid_ids") or []) if i), default=None)
+            best_m = max((t for t, i in (e.get("mux_ids") or []) if i), default=None)
+            _aud_src = e.get("aud_ids") or (formats.get(0) or {}).get("aud_ids") or []
+            best_a = max((t for t, i in _aud_src if i), default=None)
+            def _id_for(tb):   # highest-bitrate entry's format id
+                for lst in (e.get("vid_ids"), e.get("mux_ids"), _aud_src, e.get("aud_ids")):
+                    for t_, i_ in (lst or []):
+                        if t_ == tb and i_:
+                            return i_
+                return None
+            best_v, best_m, best_a = _id_for(best_v), _id_for(best_m), _id_for(best_a)
+            generic = (f"bestvideo[height<={q}]+bestaudio/best[height<={q}]"
+                       if q else "bestaudio/best")
+            if q and best_v:
+                exact = f"{best_v}" + (f"+{best_a}" if best_a else "") + (f"/{best_m}" if best_m else "")
+            elif q and best_m:
+                exact = str(best_m)
+            else:
+                exact = generic
             chosen.append({"height": q,
                            "label": e.get("label") or f"{q}p",
                            "codecs": sorted(e["exts"])[:3],
                            "fps": e.get("fps") or 0,
-                           "format": (f"bestvideo[height<={q}]+bestaudio/best[height<={q}]"
-                                      if q else "bestaudio/best"),
+                           "format": f"{exact}/{generic}",
                            "size": None})
     if 0 in formats:
         chosen.append({"height": 0, "label": "Audio only (m4a)",
@@ -276,7 +301,18 @@ async def _try_ytdlp(url: str) -> tuple[dict | None, str]:
 # ---------------------------------------------------------------------------
 # Page scanning — crawl a result page for hidden direct file links
 # ---------------------------------------------------------------------------
-async def scan_page(url: str, limit: int = 12) -> list[dict]:
+_OG_RE = re.compile('<meta[^>]+property=["\']og:(?:video|audio|image)(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']')
+_VIDSRC_RE = re.compile('<(?:video|source)[^>]+src=["\']([^"\']+)["\']')
+
+async def scan_page(url: str, limit: int = 12, wanted=None) -> list[dict]:
+    """Deep-scan one page for hidden direct media files.
+
+    Understands: bare file anchors (href ending in a media extension),
+    ``og:video/og:audio/og:image`` meta tags, ``<video>/<source>`` sources,
+    and classic Apache/nginx *index of* listings (name + size + date columns).
+    ``wanted`` optionally restricts results to a compiled extension regex.
+    """
+    import re as _re
     async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(12.0, connect=8.0),
                                  headers={"User-Agent": UA}) as client:
         try:
@@ -284,21 +320,55 @@ async def scan_page(url: str, limit: int = 12) -> list[dict]:
             resp.raise_for_status()
         except httpx.HTTPError:
             return []
+    text = resp.text
     seen: set[str] = set()
     out: list[dict] = []
-    for m in MEDIA_HREF_RE.finditer(resp.text):
+
+    def _push(full: str, size: int | None = None) -> None:
+        if not full.startswith(("http://", "https://")) or full in seen:
+            return
+        if wanted is not None and not wanted.search(full):
+            return
+        if _re.search(r"\.(js|css|png|jpe?g|svg|ico|woff2?)(\?|#|$)", full, _re.I) \
+           and not _re.search(r"\.(mp4|mkv|webm|mov|avi|flv|m4v|zip|rar|7z|t?gz|epub|pdf|djvu|mp3|flac|ogg|m4a|wav|opus|aac)$", full, _re.I):
+            return
+        seen.add(full)
+        entry = {"url": full, "filename": unquote(dk.guess_filename(full, "file")),
+                 "file_type": dk.classify(full), "size_bytes": size}
+        out.append(entry)
+
+    # og: + <source>/<video> tags
+    for m in _re.finditer(_OG_RE, text, _re.I):
+        _push(urljoin(str(resp.url), unescape_html(m.group(1))))
+    for m in _re.finditer(_VIDSRC_RE, text, _re.I):
+        _push(urljoin(str(resp.url), unescape_html(m.group(1))))
+    # plain file anchors + directory listings (name  <tab> size)
+    for m in _re.finditer(MEDIA_HREF_RE, text):
         href = unescape_html(m.group(1))
         if href.startswith(("data:", "javascript:")):
             continue
-        full = urljoin(str(resp.url), href)
-        if full in seen:
-            continue
-        seen.add(full)
-        out.append({"url": full, "filename": unquote(dk.guess_filename(full, "file")),
-                    "file_type": dk.classify(full)})
-        if len(out) >= limit:
-            break
-    return out
+        tail = text[m.end():m.end() + 260]
+        size = None
+        sm = _re.search(r"(\d+(?:[.,]\d+)\s?(?:\s?)(?:KB|MB|GB|TB))", tail, _re.I)
+        if sm:
+            size = _human_size_local(sm.group(1))
+        _push(urljoin(str(resp.url), href), size)
+    return out[:limit]
+
+
+_SIZE_MULT = {"kb": 1024, "mb": 1024 ** 2, "gb": 1024 ** 3, "tb": 1024 ** 4}
+
+
+def _human_size_local(text: str) -> int | None:
+    import re as _re
+    m = _re.search(r"([\d.,]+)\s*(kb|mb|gb|tb)", text, _re.I)
+    if not m:
+        return None
+    try:
+        return int(float(m.group(1).replace(",", "")) * _SIZE_MULT[m.group(2).lower()])
+    except (ValueError, KeyError):
+        return None
+
 
 
 def unescape_html(s: str) -> str:
@@ -513,6 +583,27 @@ def demo_ebook_results(query: str, limit: int) -> dict:
             "engines": [{"engine": e, "ok": True, "error": "", "count": 7}
                         for e in ("gutenberg", "internetarchive")],
             "results": results}
+
+
+def demo_audio_results(query: str, limit: int) -> dict:
+    import hashlib
+    results = []
+    for i, ft in enumerate(["mp3", "flac", "mp3", "ogg", "m4a", "wav", "mp3", "opus"]):
+        seed = hashlib.md5(f"m{query}{i}".encode()).hexdigest()[:10]
+        results.append({
+            "title": f"{query.title()} — demo track {i + 1}.{ft}",
+            "url": f"https://archive.org/download/demo_{seed}/{query.replace(' ', '_')}_trk{i:02d}.{ft}",
+            "thumb": "", "page": f"https://archive.org/details/demo_{seed}",
+            "domain": "archive.org", "engine": ["internetarchive", "ccmixter", "bing"][i % 3],
+            "snippet": "Demo file — demo mode is ON in Settings.",
+            "size_bytes": (i + 2) * 4_900_000, "file_type": ft, "is_direct": True,
+            "width": 0, "height": 0, "duration": 180 + i * 47, "publisher": "Demo Artist",
+        })
+    return {"query": query, "raw_query": query, "types": ["audio"], "mode": "audios",
+            "elapsed_ms": 18, "filters": {}, "vertical_blocked": False, "demo": True,
+            "engines": [{"engine": e, "ok": True, "error": "", "count": 3}
+                        for e in ("internetarchive", "ccmixter", "web_dorks")],
+            "results": results[:limit]}
 
 
 def demo_software_results(query: str, limit: int) -> dict:

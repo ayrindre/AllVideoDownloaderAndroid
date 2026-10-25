@@ -29,6 +29,10 @@ DEFAULTS: dict[str, Any] = {
         "duckduckgo": True,
         "yandex": False,
         "mojeek": True,
+        "startpage": True,
+        "brave": True,
+        "ecosia": True,
+        "marginalia": True,
     },
     "result_limit": 100,
     "safe_search": False,                # OFF by default — the user sees everything

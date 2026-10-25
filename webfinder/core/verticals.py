@@ -101,7 +101,7 @@ def _source_of(name: str, results: list[dict] | Exception) -> dict:
     if isinstance(results, Exception):
         msg = str(results)
         if "TLS" in msg or "connect" in msg.lower() or "EOF" in msg:
-            msg = "unreachable from this network — Google/DDG may be blocked by your ISP; a proxy in Settings fixes it"
+            msg = "unreachable from this network — your ISP may be blocking it; a proxy in Settings fixes it"
         return {"ok": False, "error": msg[:220], "count": 0}
     return {"ok": True, "error": "", "count": len(results)}
 
@@ -415,6 +415,7 @@ async def _bing_videos(client: httpx.AsyncClient, query: str, f: dict, limit: in
 
 _FILE_EXT_RX = {
     "video": re.compile(r"\.(mp4|mkv|webm|mov|m4v|avi|flv|wmv|3gp|ts)(\?|#|$)", re.I),
+    "audio": re.compile(r"\.(mp3|flac|m4a|wav|ogg|opus|aac|ape|wv)(\?|#|$)", re.I),
     "app": re.compile(r"\.(exe|msi|msix|appx|zip|7z|rar|dmg|pkg|deb|rpm|apk|appimage|portable)(\?|#|$)", re.I),
 }
 _PLAYABLE_HOST_RX = re.compile(r"(youtube\.com/watch\?v=|youtu\.be/|vimeo\.com/\d|dailymotion\.com/video)", re.I)
@@ -422,18 +423,20 @@ _PLAYABLE_HOST_RX = re.compile(r"(youtube\.com/watch\?v=|youtu\.be/|vimeo\.com/\
 
 async def _dork_files_fallback(client: httpx.AsyncClient, query: str, dork_type: str,
                                limit: int, safe: bool) -> list[dict]:
-    """Web engines run with the file-type dork, then HARD-GATED: a result only
-    survives when the URL itself ends in a real media/program extension (or is
-    a playable watch-page). Bing's RSS endpoint happily ignores `filetype:`
-    and returns dictionary/LinkedIn spam otherwise — that leaked before."""
-    from ..engines import ENGINES
+    """Web engines run with the file-type dork, HARD-GATED to real files — and
+    every page that *looked* file-ish but failed the gate gets deep-scanned for
+    the media it hosts (og:video, <source>, directory listings). Bing's RSS
+    ignores `filetype:`; the gate + crawl together are what turn page-hits into
+    actual downloadable files instead of LinkedIn spam."""
+    from ..engines import ENGINES, cooling_left
     from . import dorks as dk
     rx = _FILE_EXT_RX[dork_type]
     full = dk.build_query(query, [dork_type if dork_type != "app" else "software"])
     out: list[dict] = []
     seen: set[str] = set()
-    for name in ("google", "bing", "duckduckgo"):
-        if name not in ENGINES:
+    pages: list[dict] = []
+    for name in ("startpage", "google", "bing", "brave", "duckduckgo", "ecosia", "mojeek", "marginalia"):
+        if name not in ENGINES or cooling_left(name):
             continue
         try:
             res = await ENGINES[name](client, full, min(max(limit, 20), 60), safe)
@@ -442,17 +445,40 @@ async def _dork_files_fallback(client: httpx.AsyncClient, query: str, dork_type:
         for r in res:
             if r["url"] in seen:
                 continue
-            playable = dork_type == "video" and _PLAYABLE_HOST_RX.search(r["url"])
-            if not rx.search(r["url"]) and not playable:
-                continue          # pages ABOUT files never pass the gate
             seen.add(r["url"])
-            r.setdefault("thumb", "")
-            r.setdefault("page", "" if playable else r.get("url", ""))
-            r.setdefault("duration", None)
-            r["is_direct"] = bool(not playable and rx.search(r["url"]))
-            r["file_type"] = r.get("file_type") or ("video" if dork_type == "video" else "app")
-            r["engine"] = r.get("engine") or name
-            out.append(r)
+            playable = dork_type == "video" and _PLAYABLE_HOST_RX.search(r["url"])
+            if rx.search(r["url"]) or playable:
+                r.setdefault("thumb", "")
+                r.setdefault("page", "" if playable else r.get("url", ""))
+                r.setdefault("duration", None)
+                r["is_direct"] = bool(not playable and rx.search(r["url"]))
+                r["file_type"] = r.get("file_type") or dork_type
+                r["engine"] = r.get("engine") or name
+                out.append(r)
+            elif len(pages) < 14:
+                pages.append(r)          # plausible hosting page — rescue below
+    # ── deepscan rescue: crawl the top pages, harvest the files they link ──
+    if pages and len(out) < limit:
+        from .media import scan_page
+        picked = [p for p in pages if not _PLAYABLE_HOST_RX.search(p.get("url", ""))][:6]
+        scans = await asyncio.gather(*(scan_page(p["url"], 14, rx) for p in picked),
+                                     return_exceptions=True)
+        for pg, sc in zip(picked, scans):
+            if not isinstance(sc, list):
+                continue
+            for c in sc:
+                u = c["url"]
+                if u in seen:
+                    continue
+                seen.add(u)
+                out.append(_mk(u, "", c.get("filename") or u.rsplit("/", 1)[-1], pg["url"],
+                               0, 0, "deepscan", size_bytes=c.get("size_bytes"),
+                               snippet=f"harvested from {pg.get('title') or pg['url']}"[:150],
+                               file_type=c.get("file_type") or dork_type, is_direct=True))
+                if len(out) >= limit:
+                    break
+            if len(out) >= limit:
+                break
     return out
 
 
@@ -772,17 +798,21 @@ async def _internet_archive(client: httpx.AsyncClient, query: str, limit: int) -
     return out
 
 
-async def _ia_resolve(client: httpx.AsyncClient, ident: str, title: str, year: str = "") -> dict | None:
+async def _ia_resolve(client: httpx.AsyncClient, ident: str, title: str, year: str = "",
+                      kinds: tuple[str, ...] = ("epub", "pdf", "djvu"),
+                      engine: str = "internetarchive") -> dict | None:
     """Resolve an archive.org identifier to a REAL downloadable book file
     (prefers EPUB → PDF → DJVU via the metadata API). Shared by the Internet
     Archive and Open Library sources."""
     if not ident:
         return None
+    kind_suffixes = tuple(f".{k}" for k in kinds)
+    is_audio = kinds and kinds[0] in ("mp3", "flac", "ogg")
     item = {"title": (title or ident)[:160], "url": "", "thumb": f"https://archive.org/services/img/{ident}",
             "page": f"https://archive.org/details/{ident}", "domain": "archive.org",
-            "width": 0, "height": 0, "engine": "internetarchive", "snippet": "",
-            "size_bytes": None, "duration": None, "file_type": "book", "is_direct": False,
-            "publisher": "", "year": year}
+            "width": 0, "height": 0, "engine": engine, "snippet": "",
+            "size_bytes": None, "duration": None, "file_type": "audio" if is_audio else "book",
+            "is_direct": False, "publisher": "", "year": year}
     try:
         meta = (await client.get(f"https://archive.org/metadata/{ident}")).json()
         server = meta.get("server")
@@ -790,17 +820,22 @@ async def _ia_resolve(client: httpx.AsyncClient, ident: str, title: str, year: s
         for fil in (meta.get("files") or []):
             name = (fil.get("name") or "")
             low = name.lower()
-            if low.endswith((".epub", ".pdf", ".djvu")):
-                pref = {".epub": 0, ".pdf": 1, ".djvu": 2}[low[-5:] if low.endswith(".epub") else low[-4:]]
+            if low.endswith(kind_suffixes):
+                pref = min(i for i, suf in enumerate(kind_suffixes) if low.endswith(suf))
                 if best is None or pref < best[0]:
                     best = (pref, name, int(fil.get("size") or 0))
         if best and server:
             item["url"] = f"https://{server}/download/{ident}/{quote_plus(best[1])}"
             item["size_bytes"] = best[2] or None
-            item["file_type"] = "book"
+            item["file_type"] = dk_classify(best[1])
     except Exception:  # noqa: BLE001 — details page is still better than nothing
         pass
     return item
+
+
+def dk_classify(name: str) -> str:
+    from . import dorks as dk
+    return dk.classify(name)
 
 
 async def _openlibrary(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
@@ -896,6 +931,100 @@ async def search_ebooks(query: str, filters: dict | None, limit: int, safe: bool
     return {"results": results, "sources": sources}
 
 
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  AUDIO vertical — real sound files (the chip used to do a plain web search)
+# ═══════════════════════════════════════════════════════════════════════════
+AUDIO_KINDS = ("mp3", "flac", "ogg", "m4a", "wav", "opus")
+
+
+async def _ia_audio(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    """Internet Archive audio mediatype — Live Music Archive, netlabels,
+    audiobooks: direct MP3/FLAC files, zero rights grey zone."""
+    r = await client.get("https://archive.org/advancedsearch.php", params={
+        "q": f"{query} AND mediatype:(audio)", "fl[]": ["identifier", "title", "year"],
+        "rows": min(max(limit, 20), 40), "page": 1, "output": "json",
+        "sort[]": "downloads desc"})
+    r.raise_for_status()
+    docs = (((r.json() or {}).get("response") or {}).get("docs")) or []
+    if not docs:
+        raise RuntimeError("Internet Archive found no matching audio")
+
+    async def one(doc: dict) -> dict | None:
+        ident = doc.get("identifier") or ""
+        title = htmllib.unescape(str(doc.get("title") or ident))
+        return await _ia_resolve(client, ident, title, str(doc.get("year") or ""),
+                                 kinds=AUDIO_KINDS)
+
+    gathered = await asyncio.gather(*(one(d) for d in docs[:12]), return_exceptions=True)
+    out = [g for g in gathered if isinstance(g, dict) and g.get("url")]
+    if not out:
+        raise RuntimeError("Internet Archive items matched but exposed no audio files")
+    return out
+
+
+async def _ccmixter(client: httpx.AsyncClient, query: str, limit: int) -> list[dict]:
+    """ccMixter — Creative-Commons music community, JSON API, direct MP3s."""
+    r = await client.get("https://api.ccmixter.org/files",
+                         params={"searchTerms": query, "limit": min(max(limit, 20), 50)},
+                         headers={"Accept": "application/json"})
+    r.raise_for_status()
+    try:
+        items = (r.json() or {}).get("items") or []
+    except ValueError:
+        raise RuntimeError("ccMixter API returned non-JSON") from None
+    out: list[dict] = []
+    for it in items:
+        fi = (it.get("fileinfo") or {}).get("mp3") or {}
+        url = fi.get("download_url") or ""
+        if not url:
+            continue
+        try:
+            secs = int(float(fi.get("duration") or 0))
+        except (TypeError, ValueError):
+            secs = 0
+        try:
+            size = int(float(fi.get("size") or 0)) * 1024      # API size is KB
+        except (TypeError, ValueError):
+            size = None
+        user = ((it.get("user") or {}).get("name")) or ""
+        title = htmllib.unescape(str(it.get("title") or ""))
+        out.append(_mk(url, it.get("albumImage") or "",
+                       f"{title}" + (f" — {user}" if user else ""),
+                       it.get("itemurl") or "", 0, 0, "ccmixter",
+                       snippet=str(it.get("licenseName") or "CC-licensed"),
+                       duration=secs or None, size_bytes=size or None,
+                       file_type="mp3", is_direct=True, publisher=user))
+        if len(out) >= limit:
+            break
+    if not out:
+        raise RuntimeError("ccMixter had no matching free-licensed tracks")
+    return out
+
+
+async def search_audios(query: str, filters: dict | None, limit: int, safe: bool = False,
+                        proxy: str = "") -> dict:
+    f = filters or {}
+    sources: dict[str, dict] = {}
+    results: list[dict] = []
+    async with _client(proxy=proxy) as client:
+        jobs = {
+            "internetarchive": _ia_audio(client, query, limit),
+            "ccmixter": _ccmixter(client, query, limit),
+            "web_dorks": _dork_files_fallback(client, query, "audio", limit, safe),
+        }
+        gathered = await asyncio.gather(*jobs.values(), return_exceptions=True)
+    for name, res in zip(jobs, gathered):
+        sources[name] = _source_of(name, res)
+        if not isinstance(res, Exception):
+            results.extend(res)
+    kind = (f.get("kind") or "").lower()
+    if kind:
+        results = [r for r in results if (r.get("url") or "").lower().endswith(f".{kind}")]
+    results = _dedupe(results, key=lambda r: r["url"])
+    results.sort(key=lambda r: (0 if r.get("is_direct") else 1))
+    return {"results": results[:limit], "sources": sources}
+
 # ═══════════════════════════════════════════════════════════════════════════
 #  ARCHIVE vertical — dorked web, hard-relevance-gated to actual files/dirs
 # ═══════════════════════════════════════════════════════════════════════════
@@ -913,10 +1042,12 @@ async def search_archives(query: str, filters: dict | None, limit: int, safe: bo
     strategies = (
         f'{query} intitle:"index of"',
         f"{query} {mod}",
+        f"{query} (zip OR rar OR 7z) download",   # looser: mirrors don't use filetype:
     )
     sources: dict[str, dict] = {}
     kept: list[dict] = []
     dropped = 0
+    page_pool: list[dict] = []
     async with _client(proxy=proxy) as client:
         async def one_engine(name: str) -> tuple[str, list[dict] | Exception]:
             try:
@@ -936,6 +1067,9 @@ async def search_archives(query: str, filters: dict | None, limit: int, safe: bo
             continue
         rows = [r for r in out if _archive_relevant(r)]
         dropped += len(out) - len(rows)
+        for r in out:
+            if not _archive_relevant(r) and len(page_pool) < 16:
+                page_pool.append(r)        # pages that MIGHT host the files
         for r in rows:
             r.setdefault("thumb", "")
             r["file_type"] = "archive"
@@ -943,6 +1077,25 @@ async def search_archives(query: str, filters: dict | None, limit: int, safe: bo
         kept.extend(rows)
         sources[name] = {"ok": True, "error": (f"page-only hits dropped: {len(out) - len(rows)}" if out and not rows else ""),
                          "count": len(rows)}
+    # rescue: deep-scan the most promising pages for the files they link
+    if page_pool:
+        from .media import scan_page
+        rx = _FILE_EXT_RX.setdefault("archive", re.compile(
+            r"\.(zip|rar|7z|tar|t?gz|bz2|xz|iso)(\?|#|$)", re.I))
+        scanned = await asyncio.gather(*(scan_page(pg["url"], 14, rx) for pg in page_pool[:8]),
+                                       return_exceptions=True)
+        src = {"ok": True, "error": "", "count": 0}
+        for pg, sc in zip(page_pool[:8], scanned):
+            if not isinstance(sc, list):
+                continue
+            for c in sc:
+                kept.append(_mk(c["url"], "", c.get("filename") or c["url"].rsplit("/", 1)[-1],
+                                pg["url"], 0, 0, "deepscan", size_bytes=c.get("size_bytes"),
+                                snippet=f"harvested from {pg.get('title') or pg['url']}"[:150],
+                                file_type="archive", is_direct=True))
+                src["count"] += 1
+        if src["count"]:
+            sources["deepscan"] = src
     kept = _dedupe(kept, key=lambda r: r["url"])[:limit]
     return {"results": kept, "sources": sources, "dropped_irrelevant": dropped}
 

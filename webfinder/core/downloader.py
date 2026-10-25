@@ -54,6 +54,8 @@ class DownloadJob:
     finished_at: float = 0.0
     _task: Optional[asyncio.Task] = field(default=None, repr=False)
     _cancel: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    _drop: bool = False                      # cancel → auto-remove from list
+    _removed: bool = False                   # deleted; publish() must stay silent
     _pause: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
     # -- serialization ------------------------------------------------------
@@ -97,6 +99,8 @@ class DownloadManager:
             pass
 
     def publish(self, job: DownloadJob) -> None:
+        if getattr(job, "_removed", False):
+            return                      # row was deleted — never resurrect it
         self.emit("job.update", job.to_dict())
 
     # -- job control ------------------------------------------------------------
@@ -149,6 +153,9 @@ class DownloadManager:
                 await workers.get(job.kind, self._run_http)(job)
             except asyncio.CancelledError:
                 job.status = "cancelled"
+                if job._drop:
+                    self.remove(job.id)
+                    return
             except Exception as exc:  # noqa: BLE001
                 network_fail = isinstance(exc, NETWORK_ERRORS)
                 if (job.kind == "http" and network_fail
@@ -196,13 +203,22 @@ class DownloadManager:
 
     def cancel(self, job_id: str) -> bool:
         job = self.jobs.get(job_id)
-        if not job or job.status in TERMINAL:
+        if not job:
             return False
+        if job.status in TERMINAL:          # already cancelled/done: just remove
+            self.remove(job_id)
+            return True
         job._cancel.set()
         if job._task and not job._task.done():
             job._task.cancel()
         job.status = "cancelled"
         self.publish(job)
+        # user rule: a cancelled job leaves the list. queued/paused have no live
+        # worker to reap them, remove now; active workers self-remove on exit.
+        if job._task is None or job._task.done():
+            self.remove(job_id)
+        else:
+            job._drop = True
         return True
 
     def retry(self, job_id: str) -> bool:
@@ -219,6 +235,7 @@ class DownloadManager:
         job = self.jobs.pop(job_id, None)
         if not job:
             return False
+        job._removed = True
         job._cancel.set()
         if job._task and not job._task.done():
             job._task.cancel()

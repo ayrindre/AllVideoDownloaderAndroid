@@ -179,7 +179,8 @@
   const VERTICAL_LABELS = { web_dorks: "Gated dorks", apibay: "ThePirateBay", nyaa: "Nyaa",
     "1337x": "1337x", gutenberg: "Gutenberg", internetarchive: "Internet Archive",
     youtube: "YouTube", torlock: "Torlock", openlibrary: "Open Library",
-    standardebooks: "Standard Ebooks", github: "GitHub", fdroid: "F-Droid" };
+    standardebooks: "Standard Ebooks", github: "GitHub", fdroid: "F-Droid",
+    ccmixter: "ccMixter", deepscan: "Deep scan" };
   function renderEngineStrip(data) {
     const strip = $("#engine-strip");
     strip.innerHTML = "";
@@ -192,7 +193,8 @@
     });
     const n = (data.results || []).length;
     const mode = { images: "image index", videos: "video index", torrents: "torrent indexes",
-                   ebooks: "book library", archives: "file-gated web", software: "software index" }[data.mode] || "web";
+                   ebooks: "book library", archives: "file-gated web", software: "software index",
+                   audios: "audio library" }[data.mode] || "web";
     $("#rh-meta").textContent = `${n} result${n === 1 ? "" : "s"} · ${data.elapsed_ms} ms · ${mode}${data.demo ? " · demo data" : ""}`;
   }
 
@@ -221,7 +223,7 @@
     const grid = $("#results-grid");
     grid.innerHTML = "";
     const data = state.lastData;
-    const vertical = ["images", "videos", "torrents", "ebooks", "archives", "software"].includes(data?.mode);
+    const vertical = ["images", "videos", "torrents", "ebooks", "archives", "software", "audios"].includes(data?.mode);
     $("#result-filter").classList.toggle("hidden", vertical);
     grid.classList.toggle("grid-media", !!vertical);
     let list = data?.results || [];
@@ -282,7 +284,8 @@
       const HEAD = { images: ["image", "Bing, DuckDuckGo and Google media indexes"], videos: ["video", "YouTube search, Bing, DuckDuckGo and gated video-file dorks"],
                      torrents: ["torrent", "The Pirate Bay (apibay), Nyaa, 1337x and Torlock"], ebooks: ["book", "Gutenberg, Internet Archive, Open Library and Standard Ebooks"],
                      archives: ["archive", "dorked engines with a hard file-relevance gate"],
-                     software: ["download", "GitHub Releases, F-Droid APKs and gated portable-file dorks"] };
+                     software: ["download", "GitHub Releases, F-Droid APKs and gated portable-file dorks"],
+                     audios: ["audio", "Internet Archive audio, ccMixter and gated audio-file dorks"] };
       const hd = HEAD[mode] || HEAD.images;
       box.append(el("div", { class: "re-ico", html: ICONS.svg(hd[0]) }),
         el("h3", {}, `The ${mode.replace(/s$/, "")} indexes came back empty`),
@@ -352,7 +355,7 @@
       btn.innerHTML = `<span class="spinner"></span>`;
       try {
         const url = isTorrent ? r.torrent_url : r.url;
-        const ft = { videos: "video", torrents: "torrent", ebooks: "ebook", archives: "archive", software: "app" }[mode] || "image";
+        const ft = { videos: "video", torrents: "torrent", ebooks: "ebook", archives: "archive", software: "app", audios: "audio" }[mode] || "image";
         await window.API.startDownload({ url, title: r.title || "", file_type: ft });
         toast(isTorrent ? ".torrent file queued." : "Added to the download queue.", "ok", { icon: "dl", actionLabel: "View", onAction: () => S.emit("nav", "view-downloads") });
       } catch (err) { toast(err.message, "err"); }

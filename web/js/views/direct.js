@@ -110,6 +110,13 @@
         html: `${ICONS.svg("warning")}<div>FFmpeg is not installed — highest qualities that need merging will be replaced by the best single-file stream. Install with <code>winget install Gyan.FFmpeg</code> for full power.</div>` }));
     }
 
+    if (d.formats.length && d.formats.every((f) => !f.height || f.height <= 480)) {
+      info.append(el("div", { class: "notice warn", style: { marginBottom: "10px" } },
+        el("span", { html: ICONS.svg("warning") }),
+        el("div", {}, "This host is serving a **capped format map** (nothing above 480p is offered). ",
+          "Fix: Settings → Media → Browser cookies source → chrome/edge — a logged-in session unlocks the full ladder. ",
+          "The link stays valid; only quality options are limited.")));
+    }
     info.append(el("div", { class: "ac-block-label" }, "Resolution"));
     const qrow = el("div", { class: "chip-set", style: { justifyContent: "flex-start" } });
     let dlBtn = null;

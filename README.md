@@ -2,7 +2,7 @@
 
 **A premium dark-glass Windows desktop app for multi-engine file search, smart downloading and stream capture — Python backend, HTML/CSS/JS frontend.**
 
-Search Google / Bing / DuckDuckGo / Yandex / Mojeek for **videos, images, torrents, magnets, installers and archives**, grab direct download links for IDM, capture `.m3u8` streams with **FFmpeg**, and paste any media URL (YouTube & friends) into the **Smart Direct Link** module powered by **yt-dlp** — all inside one buttery-smooth, hardware-accelerated window.
+Search **nine engines** (Google · Bing · DuckDuckGo · Startpage · Brave · Ecosia · Yandex · Mojeek · Marginalia) for **videos, images, audio, torrents, magnets, installers and archives**, grab direct download links for IDM, capture `.m3u8` streams with **FFmpeg**, and paste any media URL (YouTube & friends) into the **Smart Direct Link** module powered by **yt-dlp** — all inside one buttery-smooth, hardware-accelerated window.
 
 **Windows — double-click [`run.bat`](run.bat).** It creates `.venv`, installs
 requirements (and yt-dlp) on first run, then launches the app — no commands needed.
@@ -44,8 +44,8 @@ The architecture keeps the frontend **100% HTTP + WebSocket** (`/api/*`, `/ws`) 
 │   ▼                                                                                      │
 │  HTTP/JSON  +  WebSocket progress stream  ──►  FastAPI (uvicorn, in-process thread)      │
 │                                                 ├─ /api/search   → engines/ (httpx)       │
-│                                                 │    Google · Bing(RSS) · DDG(html) ·     │
-│                                                 │    Yandex · Mojeek   + dorks/core       │
+│                                                 │    Google · Bing · DDG · Startpage ·    │
+│                                                 │    Brave · Ecosia · +5    + dorks/core  │
 │                                                 ├─ /api/downloads → core/downloader.py    │
 │                                                 │    ├─ http  : httpx stream, Range-resume │
 │                                                 │    ├─ hls   : core/ffmpeg_tools.py       │
@@ -61,7 +61,7 @@ Module map and API reference: **[ARCHITECTURE.md](ARCHITECTURE.md)**
 
 ## 3. How the smart logic works
 
-### True media verticals (images · videos · torrents · e-books · archives)
+### True media verticals (images · videos · audio · torrents · e-books · archives · software)
 Selecting a single file-type chip switches from web search to that type's dedicated
 *index sources*, so you get the files themselves — not pages about them. This routing is
 **unconditional** — the old `vertical_mode` kill-switch was removed because a stale
@@ -71,10 +71,11 @@ vertical back to plain web search:
 | | Sources | Direct fields | Filters |
 |---|---|---|---|
 | **Images** | DuckDuckGo `i.js` JSON · Bing Images · Google `tbm=isch` | full-res URL (IDM-ready), thumb, w×h, source page | size ≥800/HD/4K · aspect · color · kind (photo/clipart/line/GIF/B&W) |
-| **Videos** | **YouTube search itself** (`ytInitialData` JSON) · DuckDuckGo `v.js` · Bing Videos · dorked web *hard-gated to real media URLs* | playable URL or watch-page (both feed the yt-dlp downloader), thumb, duration, channel | length (<4m / 4–20m / >20m) · min height |
+| **Videos** | **YouTube search itself** (`ytInitialData` JSON) · DuckDuckGo `v.js` · Bing Videos · dorked web *hard-gated to real media URLs* + **deep-scan rescue** (page hits are crawled for the `.mp4/.mkv` they actually host) | playable URL or watch-page (both feed the yt-dlp downloader), thumb, duration, channel | length (<4m / 4–20m / >20m) · min height |
+| **Audio** | Internet Archive audio items (direct MP3/FLAC via the metadata resolver) · ccMixter JSON API (CC-licensed, direct MP3) · audio-file dorks gated to real extensions + deep-scan | direct file URL with size + duration, item page | kind (mp3/flac/ogg/…) |
 | **Torrents** | The Pirate Bay (`apibay.org` JSON) · Nyaa RSS · 1337x · Torlock | **magnet link** (Copy → your client), seeders/leechers/size, `.torrent` file save | min seeders |
 | **E-Books** | Gutenberg · Internet Archive · Open Library (IA-linked files only) · Standard Ebooks (OPDS) | direct EPUB/PDF file URL, cover, author, year | format (EPUB/PDF/DjVu) |
-| **Archives** | Google + Bing + DuckDuckGo + Mojeek, two parallel strategies (`intitle:"index of"` **and** `filetype:` dorks), hard-relevance-gated | only file URLs & directory listings survive — pages *about* zips are dropped | — |
+| **Archives** | every web engine × **three** parallel strategies (`intitle:"index of"`, `filetype:` dorks, `(zip OR rar OR 7z) download`), hard-relevance-gated, plus deep-scan rescue that crawls promising pages for the archives they link | only file URLs & directory listings survive — pages *about* zips are dropped | — |
 | **Software** | GitHub Releases API (real installer assets) · F-Droid APKs · gated portable-file dorks | `.exe/.msi/.apk/.dmg/…` direct downloads with size + repo, source page | — |
 
 The **Magnet** chip merged into **Torrent**: one chip searches both `.torrent` files and
@@ -92,6 +93,16 @@ back to its `lite` markup bucket when the main HTML endpoint comes back empty.
 **SafeSearch actually toggles.** Bing's image/video endpoints ignore the `adlt=off` URL
 param unless the profile cookie agrees — WebFinder sets `SRCHHPGUSR=ADLT=Off` on the wire,
 DuckDuckGo gets both `s=` and `safeSearch=`, and YouTube search gets its strict-mode `sp`
+### Getting past “all engines blocked”
+
+Web engines rate-limit hard, so the fan-out itself is engineered: every call uses a fresh
+desktop fingerprint, a 429/403/TLS-drop gets one or two **backoff retries**, and engines that
+are *proven* bot-walled enter a **40 s cool-down** — skipped instantly (the strip shows
+“cooling down 32 s”) instead of burning time, and re-tested automatically afterwards. The
+eight web engines now run **staggered** (≈0.2 s apart) so a single fan-out looks like human
+scrolling instead of a DDoS burst. Startpage fronts the Google index from a European domain,
+Brave and Ecosia run independent/Bing-backed stacks, and Marginalia indexes the deep
+file-directory web that the majors filter out — one blocked gateway no longer means no results.
 token when SafeSearch is ON. OFF means OFF.
 
 **No garbage, ever.** If Image-only (or Video-only) finds zero media, WebFinder does **not**
@@ -122,7 +133,8 @@ direct file links* — those get their own **Copy link / Download** buttons on t
 ### Smart Download routing (`core/media.py → core/downloader.py`)
 1. **Direct file** (`.mp4 .mkv .zip .exe .torrent …`) → httpx streaming worker: 256 KB chunks,
    `Content-Length`/`Content-Range` totals, **HTTP Range resume** on pause→resume, UI events
-   throttled to ~4/s.
+   throttled to ~4/s. **Cancel removes the job from the list** (the worker can never resurrect
+   its row: a removed job is muted before it publishes); **retry** re-queues from error/cancelled.
 2. **HLS/DASH stream** (`.m3u8`, `.mpd`, `mpegurl` content-type) → **FFmpeg worker**: ffprobe
    probes duration, `ffmpeg -i URL -c copy -bsf:a aac_adtstoasc -movflags +faststart out.mp4`
    (lossless remux into your preferred container; `libx264` re-encode only when asked). Progress
@@ -190,6 +202,8 @@ iscc build\installer.iss            # → Setup wizard (optional bundled ffmpeg 
 | "Open folder" said *only available in the desktop app* | That toast was a catch-all, not the truth: the folder was tracked under the *planned* filename while yt-dlp's merge renames the file, so the reveal call 404'd. Fixed on both sides — settled real paths + a reveal that walks up to the nearest existing folder and opens the downloads dir as last resort (works in browser mode too: the server is your machine). |
 | Verticals (image/video/torrent/ebook/archive) behave like plain web search after a pull | Two causes, both fixed: a stored `vertical_mode:false` gate (removed — routing is now unconditional) and WebView2 serving **cached stale JS** (`/static` now sends `Cache-Control: no-cache` and revalidates via ETag). Restart the app once after pulling to pick both up. |
 | Stats "Saved" doesn't match the files on disk | Completed jobs now reconcile `done`/`total` to the real `st_size` after the final rename; in-progress jobs intentionally show transfer bytes, and time-based (simulated) jobs never count into "Saved". |
+| All engines blocked / 429 | The app retries with backoff, cools the walled engines for 40 s and fans out to nine engines instead of four. If your ISP filters Google (Bing-only networks), keep Startpage/Brave/Ecosia checked — and add a proxy in Settings; it reroutes every engine and the verticals. |
+| Chosen YouTube resolution ignored | Format chips now carry **real yt-dlp format IDs** (`137+140/…`), not just selectors; yt-dlp self-refreshes daily (YouTube changes weekly). If the analyzer offers nothing above 480p, the host is serving a capped map — set a Browser-cookies source in Settings → Media. |
 | Few web results | Web engines now page: Bing RSS `first=` up to 4 pages, Google up to 4 `start=` pages on the fingerprinted path, Mojeek 3 pages; default `result_limit` raised 60→100. Engines you unchecked in Settings stay unchecked — the strip shows what actually ran. |
 | Video/torrent search returned unrelated web pages | The dorked-web source inside the video (and software) verticals is now **hard-gated**: a result only survives if its URL ends in a real media/program extension or is a playable watch-page. Bing's RSS endpoint happily ignores `filetype:` — that is where LinkedIn/profile spam used to leak from. |
 | Quality choice ignored (everything was 640×480) | YouTube caps the *format map* it shows anonymous `web`-client requests. The analyzer now queries the `android`/`tv` clients first and **merges whichever answer is richer**, and downloads lead with the mobile client too — the picker's 1080p/2160p entries now actually exist. If a video still downloads at 480p, set **Settings → Media → Browser cookies source** (uses your logged-in browser session — the definitive fix). |
@@ -206,4 +220,4 @@ indexes content — **you are responsible for what you download**; respect copyr
 each site's terms. Scraping is best-effort: engines may rate-limit you (the app shows *which* one
 failed instead of hiding it), and a `proxy` setting can be pointed at your own egress.
 
-*GPL-3.0 (see LICENSE). Not affiliated with Google, Bing, Yandex, DuckDuckGo, Mojeek, IDM, FFmpeg or yt-dlp.*
+*GPL-3.0 (see LICENSE). Not affiliated with Google, Bing, Yandex, DuckDuckGo, Startpage, Brave, Ecosia, Marginalia, Mojeek, IDM, FFmpeg or yt-dlp.*

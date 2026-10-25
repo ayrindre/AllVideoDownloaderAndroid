@@ -102,6 +102,7 @@
 .kv .k { color: var(--text-3); }
 .kv .v { color: var(--text); font-weight: 600; text-align: right; overflow-wrap: anywhere; }
 .notice { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 12px;
+  overflow-wrap: anywhere; word-break: break-word; min-width: 0;
   font-size: 12.5px; line-height: 1.55; }
 .notice svg { width: 15px; height: 15px; flex: none; margin-top: 1px; }
 .notice.warn { background: rgba(251,191,36,.08); border: 1px solid rgba(251,191,36,.28); color: #ffe3a1; }
@@ -276,3 +277,6 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   background: var(--accent-soft); padding: 3px 9px; border-radius: 7px; border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent); }
 .mcard > .mc-file + .mc-badge { top: 8px; left: 8px; right: auto; }
 .mcard-torrent .mc-title { font-size: 12.5px; line-height: 1.35; }
+/* long block-reason URLs must never blow out the blocked-index panel */
+.results-empty .notice, .results-empty p, .rh-engines .eng-chip { overflow-wrap: anywhere; word-break: break-word; max-width: 100%; }
+.results-empty { min-width: 0; }
