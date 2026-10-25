@@ -103,6 +103,19 @@ the UI renders an honest blocked panel — **never** a dorked web-search fallbac
 irrelevant pages are worse than an explained empty state. The Settings `proxy` applies to the
 vertical client too.
 
+### Desktop bridge contract (`desktop/window.py`)
+pywebview recursively scans **every public attribute** of the `js_api` object
+(`webview/util.py::get_functions`) to build `window.pywebview.api`. Storing the
+native window on a *public* attribute (e.g. `self.window`) sends that scan into the
+WinForms object graph; `Rectangle.Empty` returns a fresh instance per access so
+pywebview's id()-dedupe fails and the injection thread drowns in
+`window.native.AccessibilityObject.Bounds.Empty…` recursion — the window never
+finishes loading JS and looks frozen. Hence: **js_api classes expose plain methods
+only; object references must be `_private`.** Enforced by
+`tools/test_desktop_contract.py`, which re-runs pywebview's real scanner over
+`DesktopBridge` and asserts exactly `close/minimize/pick_folder/toggle_maximize`
+with zero scan errors.
+
 ### Analysis routing (`core/media.py::analyze`)
 ```
 magnet: → magnet           (copy / hand off — never “downloaded”)

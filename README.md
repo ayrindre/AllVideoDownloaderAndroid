@@ -160,6 +160,15 @@ iscc build\installer.iss            # → Setup wizard (optional bundled ffmpeg 
 `run.py --browser` serves the same UI to your default browser for styling work.
 `.venv` and `downloads/` are git-ignored; nothing else needs configuring — settings live in `%USERPROFILE%\.webfinder\settings.json`.
 
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Window "hangs" / log floods `AccessibilityObject… recursion` | Older builds exposed the window object on the `js_api` bridge, which pywebview recursively scans — fixed (bridge now uses a private `_window`; `tools/test_desktop_contract.py` guards it). Any machine can use `browser.bat` as an instant escape hatch. |
+| Console flashes and closes on `run.py` double-click | Use **`run.bat`** (manages the venv and keeps the window open on errors). `run.py` with a bare system Python now pauses with instructions instead of vanishing. |
+| `A WebFinder backend is already running` | That is intentional: `run.py` detects a live backend on the port and attaches the browser to it instead of double-binding (no more `Only one usage of each socket address`). |
+| Proxy env vars make the app ignore its own localhost | All self-probes (`run.py`, desktop launcher) now bypass the system proxy (`ProxyHandler({{})}`). |
+
 ## 6. Responsible use
 
 WebFinder is an aggregator over public search engines and public URLs. It neither hosts nor

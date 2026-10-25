@@ -31,9 +31,14 @@ def _deps_missing() -> str:
     return ""
 
 
+_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def _server_alive(url: str) -> bool:
+    """Probe localhost WITHOUT the system proxy — proxy-everything setups would
+    otherwise hang/not see their own server."""
     try:
-        with urllib.request.urlopen(url.rstrip("/") + "/api/meta", timeout=2) as r:
+        with _NO_PROXY.open(url.rstrip("/") + "/api/meta", timeout=2) as r:
             return r.status == 200
     except OSError:
         return False

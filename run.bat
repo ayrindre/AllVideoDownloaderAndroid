@@ -24,7 +24,7 @@ echo [WebFinder] Installing missing dependencies...
 ".venv\Scripts\python.exe" -c "import fastapi" 2>nul || (echo [error] dependency install failed - check your internet/proxy & pause & exit /b 1)
 
 :run
-".venv\Scripts\python.exe" run.py
+".venv\Scripts\python.exe" run.py %*
 if errorlevel 1 (
   echo.
   echo [WebFinder] exited abnormally. A full log is above.

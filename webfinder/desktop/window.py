@@ -13,37 +13,54 @@ import urllib.request
 
 
 class DesktopBridge:
-    """Methods reachable from JS as `window.pywebview.api.<name>`."""
+    """Methods reachable from JS as `window.pywebview.api.<name>`.
+
+    ⚠ CRITICAL pywebview contract: pywebview recursively introspects EVERY
+    public (non-underscore) attribute of the js_api object to build the JS
+    bridge (`webview.util.scan`).  A public attribute holding the native
+    window → it walks into the WinForms/COM object graph →
+    `window.native.AccessibilityObject.Bounds.Empty.Empty…` → WinForms
+    returns a fresh `Rectangle.Empty` instance per access, pywebview's id()
+    dedupe fails → infinite recursion → the JS-injection thread dies,
+    `_pywebviewready` never fires and the window appears frozen.
+    So: the window reference MUST stay private (`_window`). Only expose
+    plain methods here — never window/browser/state objects.
+    """
 
     def __init__(self) -> None:
-        self.window = None
+        self._window = None  # MUST be private — see class docstring
 
     # -- window controls ----------------------------------------------------
     def minimize(self):
-        self.window.minimize()
+        self._window.minimize()
 
     def toggle_maximize(self):
-        if self.window.maximized:
-            self.window.restore()
+        if self._window.maximized:
+            self._window.restore()
         else:
-            self.window.maximize()
+            self._window.maximize()
 
     def close(self):
-        self.window.destroy()
+        self._window.destroy()
 
     # -- native dialogs -------------------------------------------------------
     def pick_folder(self):
         import webview
-        selection = self.window.create_file_dialog(webview.FOLDER_DIALOG)
+        selection = self._window.create_file_dialog(webview.FOLDER_DIALOG)
         return selection[0] if selection else ""
 
 
+_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def wait_for_server(port: int, timeout: float = 15.0) -> bool:
+    """Poll /api/meta WITHOUT system proxy — machines that route everything
+    through a local proxy would otherwise never see their own localhost."""
     deadline = time.time() + timeout
     url = f"http://127.0.0.1:{port}/api/meta"
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=1.0) as resp:
+            with _NO_PROXY.open(url, timeout=1.0) as resp:
                 if resp.status == 200:
                     return True
         except OSError:
@@ -85,7 +102,7 @@ def launch(port: int, host: str) -> bool:
         easy_drag=False,         # drag handled by -webkit-app-region CSS
         background_color="#0e0e13",
     )
-    bridge.window = window
+    bridge._window = window
     # 60fps, no resize flashing on Windows
     webview.settings["ALLOW_DOWNLOADS"] = True
     webview.start(debug=False, gui="edgechromium")
