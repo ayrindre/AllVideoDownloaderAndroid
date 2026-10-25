@@ -95,6 +95,18 @@ neither / failed ──► no flags (anonymous)
   cookie extractor) and returns one actionable sentence. It backs
   `GET /api/cookies/probe` — the *Check cookies* buttons in Settings and in the
   Instagram tab, and the "cookies unreadable" pill on the scan bar.
+- `auto_browser()`/`active_browser()` handle the realistic Windows case: the
+  browser the user picked is the one whose DB is locked. Every other browser is
+  probed once (cached), and a readable one is used automatically — the scan
+  retries with it and the warning names it. `POST /api/cookies/use-best` plus
+  `use_best()` turn that into a saved setting (the *Fix cookies* button).
+- `instagram_session()` answers the follow-up question a readable source still
+  leaves open: *does it contain an Instagram login?* A Chrome profile with no
+  `sessionid` makes gallery-dl work perfectly and Instagram answer 404 — so an
+  empty scan now says that instead of looking broken.
+- A 401 from a site is a login wall, not a broken cookie store:
+  `mark_browser_failure()` refuses to remember anything unless a browser source
+  is configured *and* the message is about copying/decrypting the database.
 
 ## Instagram checker — `core/gallery.py` (+ `api`: `/api/gallery/*`)
 

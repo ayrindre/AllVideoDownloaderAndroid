@@ -161,7 +161,12 @@ Two causes, both handled structurally now:
    straight to the anonymous path instead. **Settings → Video & capture →
    *Cookies file*** takes precedence over the browser for both engines — an
    exported `cookies.txt` always reads — and the **Check cookies** button reads
-   the configured source locally (no network) to say exactly what is broken. A refused extractor is also no longer a dead end: the page
+   the configured source locally (no network) to say exactly what is broken.
+   When the chosen browser cannot be read, the app **switches to another browser
+   on the same machine whose database does read** (Firefox never locks its own),
+   says so, and *Fix cookies* makes that permanent in one click. If the cookies
+   read fine but hold no Instagram login, the tab says exactly that instead of
+   showing an empty grid. A refused extractor is also no longer a dead end: the page
    gets scanned and if it links a `master.m3u8`/mp4, **that** becomes the card —
    quality ladder included, hosting page attached as Referer, with a green
    "recovered after block" note.

@@ -123,6 +123,14 @@ async def cookies_probe():
     return await asyncio.to_thread(cookie_state.probe)
 
 
+@router.post("/cookies/use-best")
+async def cookies_use_best():
+    """Pick the browser whose cookies actually read and save it as the source."""
+    import asyncio
+    from ..core import cookies as cookie_state
+    return await asyncio.to_thread(cookie_state.use_best)
+
+
 @router.post("/system/open-path")
 async def open_path(path: str = ""):
     """Reveal a download (or the download folder) in the OS file manager."""

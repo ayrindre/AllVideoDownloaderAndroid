@@ -310,6 +310,8 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 .ig-session.ok .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
 .ig-session.err { border-color: rgba(251,113,133,.38); color: #ffc9d4; }
 .ig-session.err .dot { background: var(--danger); box-shadow: 0 0 8px var(--danger); }
+.ig-session.warn { border-color: rgba(251,191,36,.4); color: #ffe6b0; }
+.ig-session.warn .dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
 .ig-session.muted { opacity: .9; }
 .ig-stage { margin-top: 22px; display: flex; flex-direction: column; gap: 14px; }
 .ig-idle { text-align: center; padding: 46px 26px; display: flex; flex-direction: column;

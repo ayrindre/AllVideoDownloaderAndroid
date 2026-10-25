@@ -245,9 +245,31 @@
     toast("Reading the cookie source…", "info", { icon: "clock", ttl: 2500 });
     try {
       const r = await window.API.cookiesProbe();
-      toast(r.message, r.ok ? "ok" : "warn", { icon: r.ok ? "check" : "warning", ttl: r.ok ? 5000 : 15000 });
-      const meta = await window.API.meta();
-      S.meta = meta;
+      const opts = { icon: r.ok ? "check" : "warning", ttl: r.ok ? 5000 : 16000 };
+      if (r.suggest) {
+        opts.actionLabel = `Use ${r.suggest}`;
+        opts.onAction = () => useBestCookies();
+      }
+      toast(r.message, r.ok ? "ok" : "warn", opts);
+      S.meta = await window.API.meta();
+    } catch (e) {
+      toast(String(e?.message || e), "err");
+    }
+  }
+
+  /* One click instead of "go export a cookies.txt": pick the browser on this
+     machine whose cookie database actually reads (usually Firefox). */
+  async function useBestCookies() {
+    try {
+      const r = await window.API.cookiesUseBest();
+      toast(r.message, r.ok ? "ok" : "warn", { icon: r.ok ? "check" : "warning", ttl: r.ok ? 6000 : 12000 });
+      if (r.ok) {
+        const merged = await window.API.saveSettings({ ytdlp_browser_cookies: r.browser });
+        S.settings = merged;
+        S.emit("settings.changed", merged);
+        init();
+      }
+      S.meta = await window.API.meta();
     } catch (e) {
       toast(String(e?.message || e), "err");
     }

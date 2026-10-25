@@ -120,13 +120,20 @@
    * cookie source belongs on screen — not only in the error that follows. */
   function sessionChip() {
     const c = S.meta?.system?.cookies || {};
-    const mode = c.mode || (S.settings?.cookies_file ? "file" : (S.settings?.ytdlp_browser_cookies ? "browser" : ""));
+    const hasMeta = c && Object.keys(c).length > 0;
+    /* the server value is authoritative: a failed source is '' for mode, and
+       falling back to the saved setting here is what painted "chrome session"
+       green while every scan was actually running logged out */
+    const mode = hasMeta ? (c.mode || "") : (S.settings?.cookies_file ? "file" : (S.settings?.ytdlp_browser_cookies ? "browser" : ""));
     const failed = !!c.browser_failed;
-    const label = failed ? "cookies unreadable"
+    /* active_browser is what the engines will really use: when the chosen one is
+       unreadable it is either a readable fallback or nothing at all */
+    const active = c.active_browser || "";
+    const label = failed ? (active ? `${active} (fallback)` : "cookies unreadable")
       : mode === "file" ? `${String(c.file || "").split(/[\\/]/).pop() || "cookies.txt"}`
-      : mode === "browser" ? `${c.browser || S.settings?.ytdlp_browser_cookies} session`
+      : mode === "browser" ? `${active || c.browser || S.settings?.ytdlp_browser_cookies || "browser"} session`
       : "logged out";
-    const cls = failed ? "err" : mode ? "ok" : "muted";
+    const cls = failed ? (active ? "warn" : "err") : mode ? "ok" : "muted";
     const title = failed ? "The browser's cookie database could not be read — click to check."
       : mode ? "Cookie source used for scans"
       : "No cookie source: Instagram hides most profiles, stories and 18+ content from logged-out requests. Click to check.";
@@ -229,21 +236,42 @@
         ...warnings.slice(0, 2).map((w) => el("div", {}, w)),
         el("div", { class: "ig-warn-actions" },
           el("button", { class: "btn btn-ghost btn-sm", onclick: checkCookies }, "Check cookies"),
+          el("button", { class: "btn btn-ghost btn-sm", onclick: applyBestCookies }, "Fix cookies"),
           el("button", { class: "btn btn-ghost btn-sm", onclick: () => window.App.showView("view-settings") }, "Open settings"))));
   }
 
   async function checkCookies() {
     try {
       const r = await window.API.cookiesProbe();
-      toast(r.message, r.ok ? "ok" : "warn", { icon: r.ok ? "check" : "warning", ttl: r.ok ? 5000 : 14000 });
-      try {
-        const meta = await window.API.meta();
-        S.meta = meta;
-        renderOptions();
-      } catch { /* the toast already told the story */ }
+      const opts = { icon: r.ok ? "check" : "warning", ttl: r.ok ? 5000 : 16000 };
+      if (r.suggest) {
+        opts.actionLabel = `Use ${r.suggest}`;         // one click, no file juggling
+        opts.onAction = () => applyBestCookies();
+      }
+      toast(r.message, r.ok ? "ok" : "warn", opts);
+      await refreshCookieState();
     } catch (e) {
       toast(String(e?.message || e), "err");
     }
+  }
+
+  async function applyBestCookies() {
+    try {
+      const r = await window.API.cookiesUseBest();
+      toast(r.message, r.ok ? "ok" : "warn", { icon: r.ok ? "check" : "warning", ttl: r.ok ? 6000 : 12000 });
+      if (r.ok) { S.settings = { ...(S.settings || {}), ytdlp_browser_cookies: r.browser }; }
+      await refreshCookieState();
+    } catch (e) {
+      toast(String(e?.message || e), "err");
+    }
+  }
+
+  async function refreshCookieState() {
+    try {
+      const meta = await window.API.meta();
+      S.meta = meta;
+      renderOptions();
+    } catch { /* the toast already told the story */ }
   }
 
   function render(snap) {

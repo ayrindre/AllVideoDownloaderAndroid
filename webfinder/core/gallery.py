@@ -637,17 +637,26 @@ def _scan_dump(task: ScanTask, target: dict, proxy: str, delay: str) -> dict:
                       on_proc=lambda p: setattr(task, "_proc", p),
                       cookie_file=file_path)
     blob = " · ".join([result.get("raw_error") or ""] + (result.get("errors") or []))
-    if not cookie_state.is_cookie_error(blob):
+    # a broken cookie SOURCE (locked/encrypted DB) is not a site login wall
+    if not cookie_state.mark_browser_failure(blob):
         return result
-    # remember it for the whole session: every later run goes anonymous at once
-    cookie_state.mark_browser_failure(blob)
-    task.cookie_source = ""
-    retry = run_dump(target["url"], cookies="", proxy=proxy, limit=task.limit,
+    # remember it for the whole session: every later run skips the dead source
+    # ...but the user may simply have picked the wrong browser: another one on
+    # this machine can still be readable (Firefox never locks its database).
+    alt = cookie_state.auto_browser()
+    task.cookie_source = alt
+    retry = run_dump(target["url"], cookies=alt, proxy=proxy, limit=task.limit,
                      delay=delay, cancel=task._cancel,
                      on_proc=lambda p: setattr(task, "_proc", p), cookie_file=file_path)
     with task._lock:
-        warning = (f"Browser cookies could not be read ({cookie_state.EXPLAIN}) — this scan ran "
-                   "logged out, so only public media appeared.")
+        if alt:
+            warning = (f"{cookie_state.browser() or 'Browser'} cookies could not be read, so this "
+                       f"scan used {alt} instead (its cookie database is readable). If Instagram "
+                       f"asks for a login, open {alt}, sign in, then scan again — or export a "
+                       "cookies.txt (Settings → Cookies file).")
+        else:
+            warning = (f"Browser cookies could not be read ({cookie_state.EXPLAIN}) — this scan ran "
+                       "logged out, so only public media appeared.")
         if warning not in task.warnings:
             task.warnings.append(warning)
     return retry
@@ -704,6 +713,18 @@ def _run_scan(task: ScanTask) -> None:
             if not task.items and not task.errors:
                 task.errors.append("No media found — the account may be private, empty, or "
                                    "require a logged-in session (Settings → Browser cookies source).")
+            if not task.items and not task.warnings:
+                # the cookies were readable — but were they *Instagram* cookies?
+                try:
+                    sess = cookie_state.instagram_session()
+                except Exception:  # noqa: BLE001 — diagnostics never break a scan
+                    sess = {}
+                if sess.get("source") and not sess.get("instagram"):
+                    task.warnings.append(
+                        f"{sess['source']} is readable, but it has no Instagram login, so "
+                        "Instagram answers every request as a visitor. Open instagram.com in "
+                        "that browser, sign in, then scan again — or export a cookies.txt from "
+                        "the logged-in session (Settings → Video & capture → Cookies file).")
         elif not task.errors:
             task.errors.append("scan cancelled")
         task.finished = time.time()

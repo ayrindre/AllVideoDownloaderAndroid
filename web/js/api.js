@@ -36,6 +36,7 @@
     /* ── Instagram checker (gallery-dl) ─────────────────────────────────── */
     cookiesStatus: () => req("GET", "/api/cookies/status"),
     cookiesProbe: () => req("GET", "/api/cookies/probe"),
+    cookiesUseBest: () => req("POST", "/api/cookies/use-best"),
     galleryEngine: () => req("GET", "/api/gallery/engine"),
     galleryScan: (payload) => req("POST", "/api/gallery/scan", payload),
     galleryScanStatus: (id) => req("GET", `/api/gallery/scan/${id}`),
