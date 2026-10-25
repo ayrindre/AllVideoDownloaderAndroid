@@ -35,6 +35,11 @@ def ytcli_use_cli() -> bool:
     from . import ytcli
     return ytcli.use_cli()
 
+
+def friendly_err(msg: str) -> str:
+    from .ytcli import friendly
+    return friendly(msg)[:400]
+
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36 AVD/2.0"
 
 
@@ -175,25 +180,28 @@ def stream_formats(ladder: list[dict]) -> list[dict]:
     return forms
 
 
-async def fetch_manifest(url: str) -> str:
+async def fetch_manifest(url: str, referer: str = "") -> str:
     px = (settings.get("proxy") or "").strip()
     async with httpx.AsyncClient(follow_redirects=True, timeout=20.0,
                                  headers={"User-Agent": UA},
                                  **({"proxy": px} if px else {})) as client:
+        hdrs = {"Range": "bytes=0-524287"}
+        if referer:
+            hdrs["Referer"] = referer
         try:
-            r = await client.get(url, headers={"Range": "bytes=0-524287"})
+            r = await client.get(url, headers=hdrs)
             r.raise_for_status()
             return r.text
         except httpx.HTTPError as exc:
             raise RuntimeError(f"Manifest unreachable: {str(exc)[:160]}") from exc
 
 
-async def _stream_result(url: str) -> dict:
+async def _stream_result(url: str, referer: str = "") -> dict:
     """HLS/DASH → ffprobe info when available + a locally parsed variant ladder."""
     info: dict = {}
     ladder: list[dict] = []
     try:
-        text = await fetch_manifest(url)
+        text = await fetch_manifest(url, referer)
         if url.lower().endswith(".mpd") or "<mpd" in text[:600].lower():
             ladder = parse_mpd_master(text, url)
         elif "#EXTM3U" in text[:40] or "#EXT-X-STREAM-INF" in text[:6000]:
@@ -204,7 +212,7 @@ async def _stream_result(url: str) -> dict:
         info = {}
     if not info:
         try:
-            info = await probe(url)
+            info = await probe(url, {"Referer": referer} if referer else None)
         except Exception:  # noqa: BLE001 — ffprobe optional
             info = {}
     return {"kind": "hls", "url": url, "file_type": "video",
@@ -216,7 +224,7 @@ async def _stream_result(url: str) -> dict:
             "single_stream": not ladder}
 
 
-async def analyze(url: str, _depth: int = 0) -> dict:
+async def analyze(url: str, _depth: int = 0, _referer: str = "") -> dict:
     url = url.strip()
     if not re.match(r"^[a-z]+://", url, re.I) and not url.startswith("magnet:"):
         url = "https://" + url
@@ -227,7 +235,7 @@ async def analyze(url: str, _depth: int = 0) -> dict:
 
     ext = fk.url_extension(url)
     if ext in fk.STREAM_EXTS:
-        return await _stream_result(url)
+        return await _stream_result(url, _referer)
 
     # 1) Try the yt-dlp extractor registry — this covers YouTube & friends.
     media, yt_err = await _try_ytdlp(url)
@@ -241,6 +249,33 @@ async def analyze(url: str, _depth: int = 0) -> dict:
     #     in a misleading "regular web page" verdict.
     ie = await asyncio.to_thread(find_extractor, url)
     if ie:
+        # The extractor was refused — that is NOT the end. Tube/porn embed pages
+        # usually link their master manifest or mp4 in plain HTML; dig for it
+        # and RE-ANALYZE, serving a real download card, with the refusal noted.
+        try:
+            cand = await scan_page(url)
+        except Exception:  # noqa: BLE001
+            cand = []
+        vids = [c for c in cand
+                if fk.classify(c["url"]) == "video"
+                or fk.url_extension(c["url"]) in fk.VIDEO_EXTS | fk.STREAM_EXTS]
+        emb = [c for c in cand if c.get("file_type") == "embed"]
+        targets = vids + emb
+        for t in targets[:4]:
+            try:
+                sub = await analyze(t["url"], 2, _referer=url)
+            except Exception:  # noqa: BLE001 — try the next candidate
+                continue
+            if sub.get("kind") not in ("page", "magnet", "media_error"):
+                sub["recovered_after_block"] = (
+                    f"{ie} extractor refused the page, so the app served the "
+                    "file the page itself links")
+                sub["found_on_page"] = url
+                sub["referer"] = url
+                rest = [x for x in targets if x is not t][:11]
+                if rest:
+                    sub["also_found"] = rest
+                return sub
         hints = []
         e_low = (yt_err or "").lower()
         if "cookie" in e_low or "could not copy" in e_low:
@@ -253,16 +288,10 @@ async def analyze(url: str, _depth: int = 0) -> dict:
         if not ytcli_use_cli():
             hints.append("Tip: if <code>yt-dlp</code> in your terminal works better, install it on PATH and restart — "
                          "All Video Downloader prefers your newer system binary over its bundled copy automatically.")
-        try:                                # the extractor said no — the page may
-            cand = await scan_page(url)     # still carry a plain file/manifest
-        except Exception:  # noqa: BLE001
-            cand = []
-        vids = [c for c in cand if fk.classify(c["url"]) == "video"
-                or fk.url_extension(c["url"]) in fk.VIDEO_EXTS | fk.STREAM_EXTS]
         return {"kind": "media_error", "url": url, "extractor": ie, "file_type": "video",
                 "title": fk.guess_filename(url, ie),
-                "error": (yt_err or "yt-dlp returned no info")[:400],
-                "hints": hints, "candidates": vids or cand}
+                "error": friendly_err(yt_err or "yt-dlp returned no info"),
+                "hints": hints, "candidates": (vids + emb) or cand}
 
     # 2) Probe the URL itself (HEAD → ranged GET) — content-type AND magic bytes.
     px = (settings.get("proxy") or "").strip()
@@ -409,7 +438,8 @@ def _module_attempt(url: str, mode: dict, *, no_cookies: bool = False
             with yt_dlp.YoutubeDL(base_yt_opts(extra)) as ydl:
                 infos.append((client_extra, ydl.extract_info(url, download=False)))
         except Exception as exc:  # noqa: BLE001 — "no extractor" is the normal case
-            errors.append(str(exc).replace("\n", " ")[:220])
+            from .ytcli import friendly
+            errors.append(friendly(str(exc))[:220])
             continue
         fmap = (infos[-1][1] or {}).get("formats") or []
         if fmap and max((f.get("height") or 0) for f in fmap) > 480:
@@ -466,6 +496,8 @@ def _attempt_extract(url: str, mode: dict) -> tuple[dict | None, str, dict]:
         info2, err2, win2 = _module_attempt(url, mode, no_cookies=True)
         if info2 is not None:
             return info2, "", win2
+        if err2:   # anonymous pass saw something NEWER — surface that instead
+            return None, f"{err2} · (retried without browser cookies — still refused)", {}
     return info, err, win
 
 

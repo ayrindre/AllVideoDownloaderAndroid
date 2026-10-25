@@ -51,10 +51,15 @@ Two causes, both handled structurally now:
    *Update now* forces a refresh attempt.
 2. **Chrome's cookie DB.** Since Chrome 127 (App-Bound Encryption) / while Chrome is
    running, `--cookies-from-browser chrome` can die with *"Could not copy Chrome
-   cookie database"* — and that error used to abort **every** analysis. Now a cookie
-   failure transparently retries the whole ladder anonymously, the error card names
-   the cause (close Chrome fully, or pick `edge`/`firefox`), and only then do you see
-   a blocked-site verdict.
+   cookie database"* — and that one browser quirk used to abort **every** analysis
+   *and every* yt-dlp download. Now the cookie failure transparently reruns the
+   whole client ladder anonymously **on both paths** (analyzer and downloader,
+   module and system-CLI), the error card names the cause (close Chrome fully, or
+   prefer `firefox`/`edge`), and raw ANSI/`ERROR: ERROR:` noise is stripped from
+   every message shown. A refused extractor is also no longer a dead end: the page
+   gets scanned and if it links a `master.m3u8`/mp4, **that** becomes the card —
+   quality ladder included, hosting page attached as Referer, with a green
+   "recovered after block" note.
 
 ## Features that survived the pivot — and got better
 

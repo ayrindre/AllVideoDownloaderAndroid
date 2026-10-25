@@ -301,4 +301,96 @@ assert "--progress-template" in blob and "AVDPROG" in blob
 del os.environ["AVD_YTDLP_BIN"]
 print("✓ download_cmd: fmt/referer/client/progress-template all wired")
 
+# ═══ friendly(): ANSI soup and repeated ERROR: prefixes never reach the UI ═══
+raw = "\x1b[0;31mERROR:\x1b[0m [0;31mERROR:\x1b[0m Could not copy Chrome cookie database.  more"
+clean = YT.friendly(raw)
+assert clean.startswith("Could not copy Chrome cookie database"), clean
+assert "ERROR" not in clean and "\x1b" not in clean
+print("✓ friendly(): ANSI + ERROR-storm stripped for the error cards")
+
+# ═══ extractor refused → page links a master.m3u8 → app SERVES that ladder ═══
+BLOCK_PAGE = """<html><body><a href="master.m3u8">get it</a>
+<iframe src="/embed/p/99"></iframe></body></html>"""
+MASTER = """#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720
+720.m3u8
+#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=640x360
+360.m3u8
+"""
+class BlockResp(Resp):
+    pass
+class BlockClient(Client):
+    def head(self, url, **k):
+        return _done(Resp(BLOCK_PAGE, url="https://tube2.example/watch/9"))
+    def get(self, url, headers=None, **k):
+        if url.endswith(".m3u8"):
+            return _done(Resp(MASTER, url=url, headers={"content-type": "application/vnd.apple.mpegurl"}))
+        return _done(Resp(BLOCK_PAGE, url="https://tube2.example/watch/9"))
+_orig_ie = M.find_extractor
+M.find_extractor = lambda url: "PlayVids"        # pretend a named extractor exists…
+httpx.AsyncClient = BlockClient
+try:
+    out4 = asyncio.run(M.analyze("https://tube2.example/watch/9"))
+finally:
+    httpx.AsyncClient = _orig
+    M.find_extractor = _orig_ie
+assert out4["kind"] == "hls", out4               # …but the linked master saves the day
+assert out4.get("recovered_after_block"), out4
+assert [f["height"] for f in out4["formats"]] == [0, 720, 360]
+assert out4["referer"] == "https://tube2.example/watch/9"
+assert out4["formats"][1]["url"].endswith("720.m3u8")
+print("✓ block→recovery: refused extractor now auto-serves the page's m3u8 ladder (+referer)")
+
+# and when nothing is recoverable, the media_error card shows the CLEANED error
+class FailClient(Client):
+    def head(self, url, **k): return _done(Resp("<html></html>", url=url))
+    def get(self, url, headers=None, **k): return _done(Resp("<html></html>", url=url))
+M.find_extractor = lambda url: "PlayVids"
+httpx.AsyncClient = FailClient
+_orig_dl = M._try_ytdlp
+async def _fail_yt(url):
+    return None, "\x1b[0;31mERROR:\x1b[0m Could not copy Chrome cookie database. See issue 7271"
+M._try_ytdlp = _fail_yt
+_st.update({"ytdlp_browser_cookies": ""})
+try:
+    out5 = asyncio.run(M.analyze("https://tube2.example/watch/9"))
+finally:
+    M._try_ytdlp = _orig_dl
+    httpx.AsyncClient = _orig
+    M.find_extractor = _orig_ie
+assert out5["kind"] == "media_error"
+assert out5["error"].startswith("Could not copy"), out5["error"]
+print("✓ media_error card: cleaned, readable raw-extractor message")
+
+# ═══ THE screenshot bug: downloads must survive the cookie wall too ══════════
+import tempfile
+from pathlib import Path as _P
+from webfinder.core.downloader import DownloadManager, DownloadJob as _J
+tmp = _P(tempfile.mkdtemp())
+_st.update({"ytdlp_browser_cookies": "chrome"})
+class DL_YDL:
+    stats = {"with": 0, "without": 0}
+    def __init__(self, opts): self.opts = opts
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def download(self, urls):
+        if self.opts.get("cookiesfrombrowser"):
+            DL_YDL.stats["with"] += 1
+            raise RuntimeError("\x1b[0;31mERROR:\x1b[0m ERROR: Could not copy Chrome "
+                               "cookie database. See https://github.com/yt-dlp/yt-dlp/issues/7271")
+        DL_YDL.stats["without"] += 1
+        (tmp / "vid.mp4").write_bytes(b"0" * 4096)
+fake_yt.utils = types.SimpleNamespace(DownloadCancelled=type("DC", (Exception,), {}))
+fake_yt.YoutubeDL = DL_YDL
+mm = DownloadManager.__new__(DownloadManager)
+mm.jobs, mm.order, mm._emit = {}, [], (lambda e: None)
+jj = _J(url="https://youtu.be/dl", kind="ytdlp", title="vid",
+        filename="vid.mp4", filepath=str(tmp / "vid.mp4"))
+jj.meta = {"format": "137+140/best"}
+mm._ytdlp_thread(jj)                             # must NOT raise
+assert (tmp / "vid.mp4").exists()
+assert DL_YDL.stats["without"] >= 1 and DL_YDL.stats["with"] >= 1, DL_YDL.stats
+_st.update({"ytdlp_browser_cookies": _orig_st})
+print("✓ download path: cookie wall → anonymous rerun → file settled (screenshot bug fixed)")
+
 print("\nALL VIDEO-CORE FIXTURE TESTS PASSED")

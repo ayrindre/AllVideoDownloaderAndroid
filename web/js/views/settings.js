@@ -90,7 +90,7 @@
           { "": "None (anonymous)", chrome: "Chrome", edge: "Edge", brave: "Brave", chromium: "Chromium", firefox: "Firefox", vivaldi: "Vivaldi" },
           st.ytdlp_browser_cookies || "", (v) => save({ ytdlp_browser_cookies: v })),
         el("p", { style: { fontSize: "11.5px", color: "var(--text-3)", marginTop: 7, lineHeight: 1.5 } },
-          "When YouTube answers \u201cSign in to confirm you're not a bot\u201d, All Video Downloader reads your session cookies from that browser (locally, never uploaded) so extraction and downloads work on age/region-gated content. Windows: close Chrome fully after enabling, or it holds the cookie DB.")),
+          "When YouTube answers \u201cSign in to confirm you're not a bot\u201d, All Video Downloader reads your session cookies from that browser (locally, never uploaded) so extraction and downloads work on age/region-gated content. Windows: close Chrome fully after enabling, or it holds the cookie DB. Chrome 127+ on Windows encrypts it (App-Bound) — if downloads keep dying with “Could not copy Chrome cookie database”, firefox is the reliable source, or leave it empty: the app now retries every extraction and download without cookies automatically.")),
       el("div", { class: "field" },
         el("label", { class: "f-label" }, "FFmpeg folder (optional)"),
         el("div", { class: "input-row" }, ffPath,

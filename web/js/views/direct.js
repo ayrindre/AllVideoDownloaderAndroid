@@ -79,12 +79,19 @@
   }
 
   function render(d) {
-    if (d.kind === "media_error") return renderMediaError(d);
-    if (d.kind === "media") return renderMedia(d);
-    if (d.kind === "hls") return renderHls(d);
-    if (d.kind === "direct") return renderDirect(d);
-    if (d.kind === "magnet") return renderMagnet(d);
-    return renderPage(d);
+    if (d.kind === "media_error") renderMediaError(d);
+    else if (d.kind === "media") renderMedia(d);
+    else if (d.kind === "hls") renderHls(d);
+    else if (d.kind === "direct") renderDirect(d);
+    else if (d.kind === "magnet") renderMagnet(d);
+    else renderPage(d);
+    if (d.recovered_after_block) {
+      const c = document.querySelector("#analyze-stage .analyze-card");
+      c?.prepend(el("div", { class: "notice ok", style: { marginBottom: "12px" } },
+        el("span", { html: ICONS.svg("info") }),
+        el("div", {}, d.recovered_after_block +
+          " — the download uses the recovered link, not the blocked page.")));
+    }
   }
 
   /* one list widget for everything ELSE the source exposed: playlist siblings

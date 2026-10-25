@@ -23,6 +23,22 @@ from functools import lru_cache
 from ..config import settings
 
 _ERR_MARKERS = re.compile(r"could not copy|cookie database|browser cookies", re.I)
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\[[0-9;]*m")
+_ERR_PREFIX_RE = re.compile(r"^(?:\s*ERROR:\s*)+", re.I)
+
+
+def friendly(msg: str) -> str:
+    """Strip yt-dlp's ANSI colors and its habit of repeating 'ERROR: ERROR:' —
+    raw escape-sequence soup in the UI reads like the app itself is broken."""
+    if not msg:
+        return ""
+    out = _ANSI_RE.sub("", str(msg))
+    prev = None
+    while prev != out:
+        prev = out
+        out = _ERR_PREFIX_RE.sub("", out.strip()).strip()
+    out = re.sub(r"(?:\[Errno \d+\]\s*)+", "", out)
+    return re.sub(r"\s+", " ", out).strip()
 
 
 def _vparse(v: str) -> tuple[int, ...]:
@@ -115,7 +131,7 @@ def extract(url: str, *, flat: bool = False, playlist_items: str | None = None,
             except json.JSONDecodeError:
                 return None, "yt-dlp CLI emitted non-JSON output"
         err = (r.stderr or "").strip().splitlines()
-        err = err[-1][:260] if err else f"yt-dlp CLI exited {r.returncode}"
+        err = friendly(err[-1])[:260] if err else f"yt-dlp CLI exited {r.returncode}"
         if attempt == 0 and cookies and _ERR_MARKERS.search(err):
             continue                       # retry once, without cookie reading
         return None, err

@@ -317,6 +317,98 @@ class DownloadManager:
     # the answer to "my terminal works, the app doesn't")
     # ------------------------------------------------------------------
     def _ytdlp_cli_thread(self, job: DownloadJob) -> None:
+        """Drive the user's own (fresher) yt-dlp binary as a subprocess."""
+        import subprocess as _sp
+        from . import ytcli
+        d = ytcli.detect()
+        parent = Path(str(job.filepath)).parent
+        stem = Path(str(job.filename)).stem[:120] or "download"
+        base_args = ytcli.download_cmd(
+            job.url, outdir=str(parent), outstem=stem,
+            fmt=job.meta.get("format") or "bv*+ba/b",
+            container=settings.get("default_container", "mp4"),
+            referer=(job.meta.get("referer") or "").strip(),
+            client=(job.meta.get("extractor_args") or {}).get("youtube"),
+            playlist=bool(job.meta.get("playlist")))
+
+        def pump(args: list[str]) -> tuple[int | None, list[str]]:
+            try:
+                proc = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
+                                 encoding="utf-8", errors="ignore")
+            except OSError as exc:
+                raise RuntimeError(f"system yt-dlp could not run: {exc}") from None
+            job._cli_proc = proc
+            assert proc.stdout is not None
+            tail: list[str] = []
+            last = time.time()
+            for raw in proc.stdout:
+                line = raw.strip()
+                if line.startswith("AVDPROG "):
+                    parts = line.split()[1:]
+                    def _n(i: int) -> float:
+                        try:
+                            return float(parts[i]) if parts[i] not in ("NA", "") else 0.0
+                        except (IndexError, ValueError):
+                            return 0.0
+                    try:
+                        pct = float(parts[0].strip("% "))
+                    except (IndexError, ValueError):
+                        pct = 0.0
+                    done, total, speed = _n(1), _n(2) or _n(3), _n(4)
+                    if total:
+                        job.set_progress(int(done), int(total), speed or None)
+                    if pct:
+                        job.progress_pct = pct
+                    if speed:
+                        job.speed = speed
+                    if time.time() - last >= 0.25:
+                        last = time.time()
+                        self.publish(job)
+                elif line:
+                    tail.append(line)
+                    del tail[:-8]
+                if job._cancel.is_set():
+                    proc.terminate()
+                    break
+            rc = proc.wait()
+            job._cli_proc = None
+            return rc, tail
+
+        try:
+            rc, tail = pump(base_args)
+            if rc not in (0, None) and not job._cancel.is_set():
+                msg = ytcli.friendly(" · ".join(tail[-3:])) or f"exit {rc}"
+                if (ytcli._ERR_MARKERS.search(msg)
+                        and (settings.get("ytdlp_browser_cookies") or "").strip()):
+                    # cookie DB bricked the run — rerun WITHOUT the cookie flag
+                    b = str(settings.get("ytdlp_browser_cookies"))
+                    lean = [a for i2, a in enumerate(base_args)
+                            if a != "--cookies-from-browser" and not (i2 and base_args[i2 - 1] == "--cookies-from-browser" and a == b)]
+                    rc2, tail2 = pump(lean)
+                    if rc2 in (0, None):
+                        self._settle_ytdlp_file(job, parent, stem)
+                        return
+                    msg = f"{msg} · cookieless retry: {ytcli.friendly(' · '.join(tail2[-3:])) or f'exit {rc2}'}"
+                raise RuntimeError(f"[system yt-dlp] {msg[:320]}")
+            if job._cancel.is_set():
+                raise asyncio.CancelledError()
+            self._settle_ytdlp_file(job, parent, stem)
+        finally:
+            p2 = getattr(job, "_cli_proc", None)
+            if p2 is not None:
+                try:
+                    p2.kill()
+                except OSError:
+                    pass
+                job._cli_proc = None
+
+    # ------------------------------------------------------------------
+    # Worker: yt-dlp media download (runs in a thread — its API is sync)
+    # ------------------------------------------------------------------
+    # Worker: yt-dlp via the USER's system binary (kept fresh outside pip —
+    # the answer to "my terminal works, the app doesn't")
+    # ------------------------------------------------------------------
+    def _ytdlp_cli_thread(self, job: DownloadJob) -> None:
         import subprocess as _sp
         from . import ytcli
         d = ytcli.detect()
@@ -334,6 +426,7 @@ class DownloadManager:
                              encoding="utf-8", errors="ignore")
         except OSError as exc:
             raise RuntimeError(f"system yt-dlp could not run: {exc}") from None
+        job._cli_proc = proc
         assert proc.stdout is not None
         tail: list[str] = []
         last = time.time()
@@ -370,9 +463,33 @@ class DownloadManager:
         if job._cancel.is_set():
             raise asyncio.CancelledError()
         if rc not in (0, None):
-            msg = " · ".join(tail[-3:]) or f"exit {rc}"
-            if ytcli._ERR_MARKERS.search(msg):
-                msg += " — cookie DB unreadable (close Chrome fully / pick edge in Settings)"
+            msg = ytcli.friendly(" · ".join(tail[-3:])) or f"exit {rc}"
+            if (ytcli._ERR_MARKERS.search(msg)
+                    and (settings.get("ytdlp_browser_cookies") or "").strip()):
+                # retry the WHOLE run without the cookie flag, then report honestly
+                lean = [a for a in args if a not in ("--cookies-from-browser",
+                                                      str(settings.get("ytdlp_browser_cookies")))]
+                last = None
+                for _ in range(1):
+                    try:
+                        p2 = _sp.Popen(lean, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
+                                       encoding="utf-8", errors="ignore")
+                        job._cli_proc = p2
+                        for raw in p2.stdout:
+                            line = raw.strip()
+                            if line.startswith("AVDPROG ") and "%" not in line:
+                                pass
+                            if line and not line.startswith("AVDPROG"):
+                                tail.append(line)
+                                del tail[-8:]
+                        rc2 = p2.wait()
+                        if rc2 in (0, None) or self._settle_ytdlp_file(job, parent, stem):
+                            self._settle_ytdlp_file(job, parent, stem)
+                            return
+                        last = ytcli.friendly(" · ".join(tail[-3:])) or f"exit {rc2}"
+                    except OSError as exc2:
+                        last = str(exc2)
+                msg = f"cookieless retry also failed: {last or msg}"
             raise RuntimeError(f"[system yt-dlp] {msg[:300]}")
         self._settle_ytdlp_file(job, parent, stem)
 
@@ -444,20 +561,40 @@ class DownloadManager:
         attempts.append(base_yt_opts({**core, "extractor_args":
                                       {"youtube": {"player_client": ["ios", "mweb"]}}}))
         last_err: Exception | None = None
-        for opts in attempts:
-            try:
-                with yt_dlp.YoutubeDL(opts) as ydl:
-                    ydl.download([job.url])
-                self._settle_ytdlp_file(job, parent, stem)
-                return
-            except yt_dlp.utils.DownloadCancelled:
-                raise asyncio.CancelledError() from None
-            except Exception as exc:  # noqa: BLE001 — retry / final error below
-                last_err = exc
-        # both errored but attempt 1 may still have produced a complete file
-        settled = self._settle_ytdlp_file(job, parent, stem)
-        if last_err is not None and not settled:
-            raise RuntimeError(f"yt-dlp failed: {last_err}")
+
+        def run_pass(opt_list: list[dict]) -> bool:
+            nonlocal last_err
+            for opts in opt_list:
+                try:
+                    with yt_dlp.YoutubeDL(opts) as ydl:
+                        ydl.download([job.url])
+                    self._settle_ytdlp_file(job, parent, stem)
+                    return True
+                except yt_dlp.utils.DownloadCancelled:
+                    raise asyncio.CancelledError() from None
+                except Exception as exc:  # noqa: BLE001 — retry / final error below
+                    last_err = exc
+            return False
+
+        if not run_pass(attempts):
+            from .ytcli import _ERR_MARKERS, friendly
+            blob = friendly(str(last_err or ""))
+            if (_ERR_MARKERS.search(blob)
+                    and (settings.get("ytdlp_browser_cookies") or "").strip()):
+                # Chrome holds/app-bound-encrypts its cookie DB (yt-dlp #7271):
+                # NEVER let that brick a download — rerun every client pass
+                # anonymously, exactly like the analyzer learned to do.
+                anon = [{**o, "cookiesfrombrowser": None} for o in attempts]
+                last_err = None
+                if run_pass(anon):
+                    return
+                blob = friendly(str(last_err or blob))
+            # attempts may still have produced a complete file
+            settled = self._settle_ytdlp_file(job, parent, stem)
+            if last_err is not None and not settled:
+                raise RuntimeError(f"yt-dlp failed: {blob[:400] or 'unknown error'}")
+            elif not settled and blob:
+                raise RuntimeError(f"yt-dlp failed: {blob[:400]}")
 
     def _settle_ytdlp_file(self, job: DownloadJob, parent: Path, stem: str) -> bool:
         """Point the job at the REAL file yt-dlp left on disk (extension comes
