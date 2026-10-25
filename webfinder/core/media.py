@@ -40,11 +40,12 @@ def base_yt_opts(extra: dict | None = None) -> dict:
     is the single most effective fix for "Sign in to confirm you're not a bot"
     and age/region-gated videos.
     """
+    # NO custom http_headers here on purpose: yt-dlp picks a per-client
+    # UA/header profile (web vs android vs tv) that its signature descrambling
+    # depends on. Forcing a desktop-Chrome UA (what the app used to do) poisoned
+    # every client pass — "the CLI works but the app doesn't" root cause.
     opts = {"quiet": True, "no_warnings": True, "noprogress": True,
-            "socket_timeout": 30, "retries": 3, "nocheckcertificate": True,
-            # A real browser UA on the raw HTTP layer: several CDNs downgrade
-            # the offered formats purely on UA sniffing.
-            "http_headers": {"User-Agent": UA, "Accept-Language": "en-US,en;q=0.9"}}
+            "socket_timeout": 30, "retries": 3, "nocheckcertificate": True}
     browser = (settings.get("ytdlp_browser_cookies") or "").strip()
     if browser:
         opts["cookiesfrombrowser"] = (browser,)
@@ -239,10 +240,16 @@ async def analyze(url: str, _depth: int = 0) -> dict:
         if not settings.get("ytdlp_browser_cookies"):
             hints.append("Set Settings → Video & capture → <b>Browser cookies source</b> to <code>chrome</code>/<code>edge</code> so yt-dlp can use your logged-in session.")
         hints.append("The app auto-refreshes yt-dlp daily — if it just updated, restart All Video Downloader once.")
+        try:                                # the extractor said no — the page may
+            cand = await scan_page(url)     # still carry a plain file/manifest
+        except Exception:  # noqa: BLE001
+            cand = []
+        vids = [c for c in cand if fk.classify(c["url"]) == "video"
+                or fk.url_extension(c["url"]) in fk.VIDEO_EXTS | fk.STREAM_EXTS]
         return {"kind": "media_error", "url": url, "extractor": ie, "file_type": "video",
                 "title": fk.guess_filename(url, ie),
                 "error": (yt_err or "yt-dlp returned no info")[:400],
-                "hints": hints}
+                "hints": hints, "candidates": vids or cand}
 
     # 2) Probe the URL itself (HEAD → ranged GET) — content-type AND magic bytes.
     px = (settings.get("proxy") or "").strip()
@@ -315,6 +322,11 @@ async def analyze(url: str, _depth: int = 0) -> dict:
             sub = await analyze(vids[0]["url"], _depth + 1)
             if sub.get("kind") not in ("page", "magnet"):
                 sub["found_on_page"] = final
+                # most tube/CDN file links are hotlink-guarded: the download
+                # needs the hosting page as Referer to answer like the browser
+                sub["referer"] = final
+                if len(vids) > 1:
+                    sub["also_found"] = vids[1:12]
                 return sub
         except Exception:  # noqa: BLE001 — fall through to the plain page card
             pass
@@ -333,53 +345,85 @@ def _magnet_title(url: str) -> str:
 _QUALITY_ORDER = (4320, 2880, 2160, 1440, 1080, 720, 480, 360, 240, 144)
 
 
-def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
-    """Extract media info. Returns (info, error) — error is surfaced to the UI."""
+_CLIENT_ATTEMPTS = (
+    {},                                                  # bare CLI behaviour first
+    {"player_client": ["android", "tv"]},                # rescue: web map capped?
+    {"player_client": ["ios", "mweb"]},                  # rescue: still capped?
+)
+
+
+def _attempt_extract(url: str, mode: dict) -> tuple[dict | None, str, dict]:
+    """Run the client ladder for one URL; returns (info, error, winning client)."""
     try:
         import yt_dlp
     except ImportError:
-        return None, "yt-dlp is not installed in the backend venv."
-    base = {"skip_download": True, "extract_flat": False,
-            "playlist_items": "1", "noplaylist": True, "socket_timeout": 15}
+        return None, "yt-dlp is not installed in the backend venv.", {}
     errors: list[str] = []
-    info = None
-    # Mobile/TV clients FIRST: anonymous requests from flagged IPs get a
-    # 640×480-capped format map from the plain web client — that made the
-    # quality picker lie ("selected 1080, downloaded 480"). We take whichever
-    # attempt yields the RICHER map, and merge format lists when both answer.
-    infos: list[dict] = []
-    for extra in ({"extractor_args": {"youtube": {"player_client": ["android", "tv"]}}},
-                  {"extractor_args": {"youtube": {"player_client": ["ios", "mweb"]}}},
-                  {}):
+    infos: list[tuple[dict, dict]] = []
+    for client_extra in _CLIENT_ATTEMPTS:
+        extra = dict(mode)
+        if client_extra:
+            extra["extractor_args"] = {"youtube": client_extra}
         try:
-            with yt_dlp.YoutubeDL(base_yt_opts({**base, **extra})) as ydl:
-                infos.append(ydl.extract_info(url, download=False))
+            with yt_dlp.YoutubeDL(base_yt_opts(extra)) as ydl:
+                infos.append((client_extra, ydl.extract_info(url, download=False)))
         except Exception as exc:  # noqa: BLE001 — "no extractor" is the normal case
             errors.append(str(exc).replace("\n", " ")[:220])
-        # A rich map already? stop hammering the site.
-        if infos and max((f.get("height") or 0) for f in (infos[-1].get("formats") or [{"height": 0}])) > 480:
-            break
-    if infos:
-        infos.sort(key=lambda i: -len(i.get("formats") or []))
-        info = dict(infos[0])
-        seen_ids: set = set()
-        merged_fmt: list[dict] = []
-        for cand in infos:
-            for f in cand.get("formats") or []:
-                fid = f.get("format_id")
-                if fid not in seen_ids:
-                    seen_ids.add(fid)
-                    merged_fmt.append(f)
-        info["formats"] = merged_fmt
-    else:
-        info = None
+            continue
+        fmap = (infos[-1][1] or {}).get("formats") or []
+        if fmap and max((f.get("height") or 0) for f in fmap) > 480:
+            break                                       # rich map — stop hammering
+        if (infos[-1][1] or {}).get("_type") == "playlist":
+            break                                       # listing worked; no rescue needed
+    if not infos:
+        return None, " · ".join(dict.fromkeys(errors)) or "yt-dlp returned nothing", {}
+    infos.sort(key=lambda ci: -len((ci[1] or {}).get("formats") or []))
+    win_client, info = infos[0]
+    seen: set = set()
+    merged: list[dict] = []
+    for _, cand in infos:
+        for f in (cand or {}).get("formats") or []:
+            fid = f.get("format_id")
+            if fid not in seen:
+                seen.add(fid)
+                merged.append(f)
+    info = dict(info)
+    info["formats"] = merged
+    return info, "", (win_client or {})
+
+
+def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
+    """Extract media info. Returns (info, error) — error is surfaced to the UI."""
+    mode = {"skip_download": True, "extract_flat": "in_playlist",
+            "noplaylist": False, "playlist_items": "1-25", "socket_timeout": 15}
+    info, err, win_client = _attempt_extract(url, mode)
     if not info:
-        return None, " · ".join(dict.fromkeys(errors))
+        return None, err
+
+    # ── playlist / gallery URLs (tube channels, video sets, mix lists) ──────
+    playlist_meta = None
     if info.get("_type") == "playlist":
-        entries = info.get("entries") or []
-        info = entries[0] if entries else None
-    if not info:
-        return None, "Extractor returned a playlist with no playable entry."
+        entries = [e for e in (info.get("entries") or []) if isinstance(e, dict)]
+        if not entries:
+            return None, "Extractor returned a playlist with no playable entry."
+        playlist_meta = {
+            "total": int(info.get("playlist_count") or len(entries)),
+            "entries": [{"title": str(e.get("title") or e.get("id") or "untitled")[:160],
+                         "url": e.get("url") or e.get("webpage_url") or "",
+                         "duration": e.get("duration") or 0}
+                        for e in entries[1:25]]}
+        first_url = entries[0].get("url") or entries[0].get("webpage_url")
+        if not first_url:
+            return None, "Playlist entries carry no playable URLs."
+        full = dict(mode)
+        full.update({"extract_flat": False, "noplaylist": True})
+        full.pop("playlist_items", None)
+        info2, err2, win2 = _attempt_extract(first_url, full)
+        if not info2 or info2.get("_type") == "playlist":
+            return None, err2 or "First playlist entry could not be extracted."
+        info, win_client = info2, win2
+    elif "entries" in info and info.get("_type") != "video":
+        pass  # a flat single entry — formats are already attached
 
     formats: dict[int, dict] = {}
     for f in info.get("formats", []):
@@ -462,9 +506,12 @@ def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
         "needs_ffmpeg_merge": not find_ffmpeg()["available"],
         "ffmpeg": find_ffmpeg()["available"],
     }
-    # MUST be a (media, error) tuple — `analyze()` unpacks `media, yt_err = …`.
-    # Returning the bare dict here made every SUCCESSFUL extraction crash with
-    # "too many values to unpack (expected 2, got 14)" (14 = the dict's keys).
+    # Remember WHICH client answered so the download runs the same recipe —
+    # ids found by the tv client must be downloaded by the tv client, not web.
+    if win_client:
+        media["extractor_args"] = {"youtube": win_client}
+    if playlist_meta:
+        media["playlist"] = playlist_meta
     return media, ""
 
 
@@ -594,7 +641,8 @@ async def plan_download(url: str, title: str = "", fmt: dict | None = None) -> d
                 "file_type": "video",
                 "filename": re.sub(r'[<>:"/\\|?*]', "_", media["title"])[:150] + f".{settings.get('default_container','mp4')}",
                 "meta": {"format": fmt_spec, "quality": (chosen or {}).get("label", "best"),
-                         "extractor": media["extractor"]}}
+                         "extractor": media["extractor"],
+                         "extractor_args": media.get("extractor_args") or None}}
     # If the user explicitly chose a format card, trust yt-dlp.
     if fmt and fmt.get("format"):
         return {"url": url, "kind": "ytdlp", "title": title or fk.guess_filename(url),

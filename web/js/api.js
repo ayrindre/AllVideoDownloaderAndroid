@@ -30,6 +30,8 @@
     clearFinished: () => req("POST", "/api/downloads/clear"),
     openPath: (p) => req("POST", `/api/system/open-path${p ? `?path=${encodeURIComponent(p)}` : ""}`),
     exit: () => req("POST", "/api/system/exit"),
+    scan: (url) => req("POST", "/api/scan", { url }),
+    selfupdate: () => req("POST", "/api/system/selfupdate"),
   };
 
   /* ── desktop bridge: window controls & native dialogs via pywebview ──── */

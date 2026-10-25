@@ -133,7 +133,22 @@
   function secSystem() {
     const st = S.settings;
     const m = S.meta;
+    const upd = el("button", { class: "btn btn-ghost btn-sm", onclick: async (e) => {
+      const b = e.currentTarget; const orig = b.innerHTML;
+      b.disabled = true; b.innerHTML = `<span class="spinner"></span> pip update…`;
+      try {
+        const r = await window.API.selfupdate();
+        if (r.ok) { toast(`yt-dlp → ${r.version}. Restart the app to load it.`, "ok"); }
+        else toast(`pip failed: ${(r.detail || "").slice(-160)}`, "err", { ttl: 9000 });
+      } catch (err) { toast(err.message, "err"); }
+      finally { b.disabled = false; b.innerHTML = orig; }
+    } }, "Update now");
     return card("System", "Runtime health.", "cpu",
+      el("div", { class: "set-row" },
+        el("div", { class: "sr-txt" },
+          el("b", {}, `yt-dlp extractor · ${m.system.yt_dlp || "not installed"}`),
+          el("span", {}, "YouTube changes its API weekly — if your terminal's yt-dlp works but the app does not, this is the gap. The app also refreshes itself once a day at launch.")),
+        upd),
       el("div", { style: { marginTop: 8 } },
         el("div", { class: "kv" }, el("span", { class: "k" }, "App"), el("span", { class: "v" }, `${m.app} ${m.version}`)),
         el("div", { class: "kv" }, el("span", { class: "k" }, "Shell"), el("span", { class: "v" }, m.system.desktop ? "pywebview · frameless · WebView2" : "browser dev mode")),

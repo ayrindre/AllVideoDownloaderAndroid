@@ -20,15 +20,19 @@ any OS  → python run.py --no-open   (browser mode at http://127.0.0.1:8765)
 
 | The link looks like | What the engine does |
 |---|---|
-| YouTube / Vimeo / TikTok / ~1,900 sites | yt-dlp, **three client passes** (android+tv → ios+mweb → web) until the format map stops lying; maps merged by richest-first. Quality chips carry **exact format IDs** (`137+140/…`), so "picked 1080p, got 480p" is structurally impossible. |
+| YouTube / Vimeo / TikTok / ~1,900 sites | yt-dlp runs with **bare CLI defaults first** — the exact recipe that works in a terminal (no forced UA headers: those poisoned yt-dlp's per-client profiles). Only if the map comes back 480p-capped do android/tv and ios/mweb passes kick in, and **the client that answered is remembered** so the download reuses the same recipe. Quality chips carry **exact format IDs** (`137+140/…`) — "picked 1080p, got 480p" is structurally impossible. |
 | A raw `.mp4/.mkv/.webm/…` URL | Content-type **and magic bytes** (`ftyp`/EBML/FLV/RIFF) are checked; streamed with HTTP Range resume through the built-in manager. No yt-dlp detour when there's nothing to detour from. |
 | `.m3u8` / `.mpd` manifests | The master is fetched and **parsed locally**: every variant/representation becomes a selectable rung (height + bitrate, real rep-ids for DASH). Chosen rung → yt-dlp (muxes the separate audio track!); no yt-dlp → FFmpeg `-c copy` on exactly that variant playlist. |
+| Playlist / channel / tube-gallery pages | Extracted flat (`in_playlist`): the **first entry** becomes the fully-analyzed card, the next 24 ride along under *"More from this playlist"* with per-entry Analyze / Download / Copy. Nothing gets silently truncated to one video. |
 | A page that *plays* a video | Deep-scan: `og:video`, `<video>/<source>`, file anchors, Apache *index-of* listings (with sizes) — and when a video URL surfaces, the app **re-analyzes that URL** one level deep and hands you its real card, not a candidate list. |
 | A magnet | Honestly identified; copy it to your torrent client. (This app doesn't fake P2P.) |
 
-Failures are honest: a bot-walled platform returns the *actual* extractor error with the
-two fixes that work (browser cookies source; the daily automatic `yt-dlp` refresh that
-`run.py` performs on its own).
+Hotlink-guarded CDNs (a lot of file hosts and tube sites) get the hosting page sent as
+**Referer** automatically — analyze found the file on a page, the download inherits it.
+Failures are honest: a bot-walled platform returns the *actual* extractor error, **plus a
+"Deep-scan anyway" button that digs the page for plain file links regardless** — and the
+two fixes that work (browser cookies source; Settings → System → *Update yt-dlp now*,
+mirroring the daily automatic refresh `run.py` performs at launch).
 
 ## Features that survived the pivot — and got better
 

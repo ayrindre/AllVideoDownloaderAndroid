@@ -87,6 +87,47 @@
     return renderPage(d);
   }
 
+  /* one list widget for everything ELSE the source exposed: playlist siblings
+     and additional files found on the hosting page — completeness is the point */
+  function moreBlock(d) {
+    const rows = [];
+    const ref = d.referer || d.found_on_page || "";
+    if (d.playlist?.entries?.length)
+      for (const e of d.playlist.entries)
+        rows.push({ title: e.title || "untitled", url: e.url, kind: "video", dur: e.duration });
+    if (d.also_found?.length)
+      for (const c of d.also_found)
+        rows.push({ title: c.filename || c.url, url: c.url, kind: "file", size: c.size_bytes });
+    if (!rows.length) return null;
+    const list = el("div", { class: "rc-candidates", style: { borderStyle: "solid", marginTop: 10 } });
+    for (const it of rows.slice(0, 20)) {
+      if (!it.url) continue;
+      list.append(el("div", { class: "cand" },
+        el("span", { class: "cand-name", title: it.url }, it.title
+          + (it.dur ? ` · ${fmtDuration(it.dur)}` : "")
+          + (it.size ? ` · ${fmtBytes(it.size)}` : "")),
+        it.kind === "video"
+          ? el("button", { class: "icon-btn", title: "Open this entry in the analyzer", html: ICONS.svg("scan"),
+              onclick: () => { $("#direct-url").value = it.url; analyze(); } })
+          : el("button", { class: "icon-btn", title: "Analyze this file", html: ICONS.svg("scan"),
+              onclick: () => { $("#direct-url").value = it.url; analyze(); } }),
+        el("button", { class: "icon-btn", title: "Download directly", html: ICONS.svg("download"),
+          onclick: async (e) => {
+            const b = e.currentTarget; b.disabled = true;
+            try { await window.API.startDownload({ url: it.url, filename: it.title, meta: ref ? { referer: ref } : {} });
+              toast("Added to downloads.", "ok", { icon: "dl" }); }
+            catch (err) { toast(err.message, "err"); }
+            finally { b.disabled = false; }
+          } }),
+        el("button", { class: "icon-btn", title: "Copy link", html: ICONS.svg("copy"),
+          onclick: () => { window.UI.copyText(it.url); toast("Link copied.", "ok", { icon: "copy" }); } })));
+    }
+    const label = d.playlist?.entries?.length
+      ? `More from this playlist · ${d.playlist.total - 1} left`
+      : `Also found on this page · ${rows.length}`;
+    return el("div", {}, el("div", { class: "ac-block-label", style: { marginTop: 16 } }, label), list);
+  }
+
   function renderMedia(d) {
     const card = cardShell(`MEDIA · ${d.extractor || "yt-dlp"}`, "#a855f7");
     const sel = { height: pickDefaultQuality(d.formats), format: null };
@@ -144,6 +185,8 @@
       el("a", { class: "btn btn-ghost", href: d.webpage || d.url, target: "_blank", rel: "noopener" },
         el("span", { class: "btn-ico", html: ICONS.svg("external") }), el("span", {}, "Open page")));
     info.append(actions);
+    const more = moreBlock(d);
+    if (more) info.append(more);
     grid.append(thumb, info);
     card.append(grid);
   }
@@ -199,6 +242,8 @@
         el("span", {}, laddered ? `Download ${sel.fmt?.label || "chosen variant"}` : "Capture & convert")),
       el("button", { class: "btn btn-ghost", onclick: () => { window.UI.copyText(d.url); toast("Stream URL copied — works with VLC, IDM & yt-dlp too.", "ok", { icon: "copy" }); } },
         el("span", { class: "btn-ico", html: ICONS.svg("copy") }), el("span", {}, "Copy stream URL"))));
+    const moreH = moreBlock(d);
+    if (moreH) body.append(moreH);
     card.append(body);
   }
 
@@ -209,7 +254,8 @@
     const original = btn.innerHTML;
     btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>`;
     try {
-      await window.API.startDownload({ url: d.url, title: d.title || "", meta: { fmt: sel.fmt } });
+      await window.API.startDownload({ url: d.url, title: d.title || "",
+        meta: { fmt: sel.fmt, ...(d.referer || d.found_on_page ? { referer: d.referer || d.found_on_page } : {}) } });
       toast("Transfer started — watch it in the Download Manager.", "ok", { icon: "dl", actionLabel: "View", onAction: () => S.emit("nav", "view-downloads") });
     } catch (err) { toast(err.message, "err"); }
     finally { btn.disabled = false; btn.innerHTML = original; }
@@ -231,6 +277,8 @@
         el("span", { class: "btn-ico", html: ICONS.svg("copy") }), el("span", {}, "Copy download link")),
       el("a", { class: "btn btn-ghost", href: d.url, target: "_blank", rel: "noopener" },
         el("span", { class: "btn-ico", html: ICONS.svg("external") }), el("span", {}, "Open"))));
+    const moreD = moreBlock(d);
+    if (moreD) body.append(moreD);
     card.append(body);
   }
 
@@ -242,13 +290,50 @@
     for (const hint of d.hints || []) {
       card.append(el("div", { class: "notice info", style: { marginBottom: 8 }, html: `${ICONS.svg("info")}<div>${hint}</div>` }));
     }
+    const candBox = el("div", { id: "block-scan-box" });
+    if (d.candidates?.length) renderCands(d.candidates, d, candBox);
     card.append(el("div", { class: "ac-actions" },
       el("button", { class: "btn btn-primary", onclick: () => { S.emit("nav", "view-settings"); toast("Settings → Video & capture → Browser cookies source.", "info"); } },
         el("span", { class: "btn-ico", html: ICONS.svg("settings") }), el("span", {}, "Open Settings (cookies)")),
       el("button", { class: "btn btn-ghost", onclick: analyze },
         el("span", { class: "btn-ico", html: ICONS.svg("refresh") }), el("span", {}, "Retry")),
+      el("button", { class: "btn btn-ghost", onclick: async (e) => {
+        const b = e.currentTarget; b.disabled = true; b.innerHTML = `<span class="spinner"></span> Deep-scan…`;
+        try {
+          const { candidates } = await window.API.scan(d.url);
+          if (!candidates.length) toast("Deep scan found no plain media links either — the player is fully scripted.");
+          renderCands(candidates, d, candBox);
+        } catch (err) { toast(err.message, "err"); }
+        finally { b.disabled = false; b.innerHTML = `${ICONS.svg("scan")} Deep-scan anyway`; }
+      }, html: `${ICONS.svg("scan")} Deep-scan anyway` }),
       el("button", { class: "btn btn-ghost", onclick: () => { window.UI.copyText(d.url); toast("URL copied — it works in yt-dlp CLI / IDM too.", "ok", { icon: "copy" }); } },
         el("span", { class: "btn-ico", html: ICONS.svg("copy") }), el("span", {}, "Copy URL"))));
+    card.append(candBox);
+  }
+
+  function renderCands(cands, d, box) {
+    box.innerHTML = "";
+    if (!cands?.length) return;
+    const list = el("div", { class: "rc-candidates", style: { borderStyle: "solid", marginTop: 12 } });
+    for (const c of cands.slice(0, 16)) {
+      list.append(el("div", { class: "cand" },
+        el("span", { class: "cand-name", title: c.url }, c.filename
+          + (c.size_bytes ? ` · ${fmtBytes(c.size_bytes)}` : "")),
+        el("button", { class: "icon-btn", title: "Analyze this link", html: ICONS.svg("scan"),
+          onclick: () => { $("#direct-url").value = c.url; analyze(); } }),
+        el("button", { class: "icon-btn", title: "Download directly", html: ICONS.svg("download"),
+          onclick: async (e) => {
+            const b = e.currentTarget; b.disabled = true;
+            try { await window.API.startDownload({ url: c.url, filename: c.filename, meta: { referer: d.url } });
+              toast("Added to downloads.", "ok", { icon: "dl" }); }
+            catch (err) { toast(err.message, "err"); }
+            finally { b.disabled = false; }
+          } }),
+        el("button", { class: "icon-btn", title: "Copy link", html: ICONS.svg("copy"),
+          onclick: () => { window.UI.copyText(c.url); toast("Link copied.", "ok", { icon: "copy" }); } })));
+    }
+    box.append(el("div", { class: "ac-block-label", style: { marginTop: 14 } },
+      `Media found inside the page · ${Math.min(cands.length, 16)}`), list);
   }
 
   function renderMagnet(d) {
@@ -267,21 +352,20 @@
     const card = cardShell("PAGE · no direct file", "#8b8b96");
     card.append(el("h2", { class: "ac-title", style: { marginBottom: 8 } }, d.url));
     card.append(el("p", { style: { fontSize: 13, color: "var(--text-2)", lineHeight: 1.7 } },
-      "That URL plays its video through a script — no plain file link, but the deep scan dug. " + (d.candidates?.length
-        ? `The deep-link scanner found <b>${d.candidates.length}</b> downloadable file${d.candidates.length === 1 ? "" : "s"} inside it:`
-        : "No direct file links were found inside it — the real file is probably loaded by JavaScript.")));
-    if (d.candidates?.length) {
-      const list = el("div", { class: "rc-candidates", style: { borderStyle: "solid", marginTop: 12 } });
-      for (const c of d.candidates) {
-        list.append(el("div", { class: "cand" },
-          el("span", { class: "cand-name", title: c.url }, c.filename),
-          el("button", { class: "icon-btn", title: "Copy link", html: ICONS.svg("copy"), onclick: () => { window.UI.copyText(c.url); toast("Link copied.", "ok", { icon: "copy" }); } }),
-          el("button", { class: "icon-btn", title: "Download", html: ICONS.svg("download"), onclick: async () => {
-            try { await window.API.startDownload({ url: c.url, filename: c.filename }); toast("Added to downloads.", "ok", { icon: "dl" }); } catch (e) { toast(e.message, "err"); }
-          } })));
-      }
-      card.append(list);
-    }
+      "That URL plays its video through a script — no plain file link surfaced as a single answer."));
+    const box = el("div");
+    if (d.candidates?.length) renderCands(d.candidates, d, box);
+    else box.append(el("div", { class: "ac-actions", style: { marginTop: 12 } },
+      el("button", { class: "btn btn-primary", onclick: async (e) => {
+        const b = e.currentTarget; b.disabled = true; b.innerHTML = `<span class="spinner"></span> Scanning…`;
+        try {
+          const { candidates } = await window.API.scan(d.url);
+          if (!candidates.length) toast("Nothing plain in there — grab the real URL from DevTools → Network.");
+          renderCands(candidates, d, box);
+        } catch (err) { toast(err.message, "err"); }
+        finally { b.disabled = false; b.innerHTML = "Deep-scan this page"; }
+      }, html: `${ICONS.svg("scan")} Deep-scan this page` })));
+    card.append(box);
   }
 
   function renderError(msg) {
@@ -301,7 +385,11 @@
       const body = { url: d.url, title: d.title || "" };
       if (d.kind === "media") body.kind = "ytdlp";
       if (d.kind === "hls") body.kind = "hls";
-      if (d.kind === "media" && fmt) body.meta = { format: fmt.format, quality: fmt.label };
+      if (d.kind === "media" && fmt) {
+        body.meta = { format: fmt.format, quality: fmt.label };
+        if (d.extractor_args) body.meta.extractor_args = d.extractor_args;
+        if (d.referer || d.found_on_page) body.meta.referer = d.referer || d.found_on_page;
+      }
       await window.API.startDownload(body);
       toast("Transfer started — watch it in the Download Manager.", "ok", { icon: "dl", actionLabel: "View", onAction: () => S.emit("nav", "view-downloads") });
     } catch (err) {

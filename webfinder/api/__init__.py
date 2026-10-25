@@ -53,9 +53,8 @@ class SettingsPatch(BaseModel):
 async def meta():
     ff = find_ffmpeg()
     try:
-        import yt_dlp
-        ytdlp_version = getattr(yt_dlp, "VERSION", "?")
-    except ImportError:
+        from yt_dlp.version import __version__ as ytdlp_version
+    except Exception:  # noqa: BLE001 — not installed / stale package layout
         ytdlp_version = None
     return {
         "app": APP_NAME, "version": APP_VERSION,
@@ -110,6 +109,38 @@ async def open_path(path: str = ""):
     return {"ok": True, "opened": str(target)}
 
 
+@router.post("/system/selfupdate")
+async def selfupdate():
+    """One-click 'make the app's yt-dlp as fresh as my terminal's'.
+
+    The #1 reason the CLI downloads 4K while the app only offers 480p is a
+    stale pip copy inside the app venv (YouTube changes its API weekly).
+    """
+    import asyncio
+    py = sys.executable
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            py, "-m", "pip", "install", "-U", "--quiet", "--disable-pip-version-check", "yt-dlp",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=300)
+    except asyncio.TimeoutError:
+        raise HTTPException(504, "pip timed out — network blocked? Try again or install manually.")
+    except OSError as exc:
+        raise HTTPException(500, f"pip could not run: {exc}")
+    # read the NEW version in a child process (this one still has the old import cached)
+    new_v = "?"
+    try:
+        pv = await asyncio.create_subprocess_exec(
+            py, "-c", "from yt_dlp.version import __version__; print(__version__)",
+            stdout=asyncio.subprocess.PIPE)
+        o2, _ = await asyncio.wait_for(pv.communicate(), timeout=20)
+        new_v = o2.decode().strip() or "?"
+    except Exception:  # noqa: BLE001
+        pass
+    return {"ok": proc.returncode == 0, "version": new_v, "restart_needed": True,
+            "detail": (out or b"").decode("utf-8", "ignore")[-300:]}
+
+
 @router.post("/system/exit")
 async def exit_app():
     """Sidebar Exit: the backend terminates itself; the desktop window dies
@@ -124,6 +155,13 @@ async def exit_app():
 # ---------------------------------------------------------------------------
 # Smart link analysis — the whole app hangs off this one endpoint
 # ---------------------------------------------------------------------------
+@router.post("/scan")
+async def scan(body: AnalyzeRequest):
+    """Deep-scan one URL for the media it hosts (pages the extractor refused,
+    galleries, directory listings). Never a dead end."""
+    return {"candidates": await media.scan_page(body.url, limit=24)}
+
+
 @router.post("/analyze")
 async def analyze(body: AnalyzeRequest):
     try:

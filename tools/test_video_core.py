@@ -94,20 +94,27 @@ INFO = {"title": "t", "extractor_key": "Youtube", "formats": [
     {"format_id": "140", "ext": "m4a", "vcodec": "none", "acodec": "mp4a.40.2", "abr": 129},
     {"format_id": "18", "ext": "mp4", "vcodec": "avc1.42001E", "acodec": "mp4a.40.2", "height": 360, "tbr": 600},
 ]}
+GALLERY = {"_type": "playlist", "playlist_count": 3, "title": "tube gallery",
+           "entries": [{"title": "clip A", "url": "https://youtu.be/a", "duration": 120},
+                       {"title": "clip B", "url": "https://youtu.be/b", "duration": 90},
+                       {"title": "clip C", "url": "https://youtu.be/c", "duration": 60}]}
+CALLS: list[dict] = []
 class _YDL:
-    def __init__(self, opts): self.opts = opts
+    def __init__(self, opts): self.opts = opts; CALLS.append(opts)
     def __enter__(self): return self
     def __exit__(self, *a): return False
     def extract_info(self, url, download=False):
-        # only the platform URL answers; raw file URLs must fall through
+        if "gallery" in url:
+            return GALLERY
+        # only platform URLs answer; raw file URLs must fall through
         if "youtu" not in url:
             raise RuntimeError("ERROR: no suitable InfoExtractor for " + url)
-        # first client pass (android/tv) returns the rich map
-        assert "player_client" in str(self.opts.get("extractor_args", {}))
         return INFO
 fake_yt.YoutubeDL = _YDL
 sys.modules["yt_dlp"] = fake_yt
 media_obj, err = M._ytdlp_extract("https://youtu.be/x")
+assert CALLS and "extractor_args" not in CALLS[0], \
+    "first pass must be bare CLI defaults (that is the path users prove works)"
 sel = {f["height"]: f["format"] for f in media_obj["formats"]}
 assert sel[1080].startswith("137+140/"), sel[1080]
 assert "399+140" in sel[2160], sel[2160]
@@ -178,5 +185,33 @@ assert APP_NAME == "All Video Downloader"
 assert not {"engines", "result_limit", "safe_search", "resolve_pages", "demo_mode"} & set(DEFAULTS)
 assert "proxy" in DEFAULTS and "default_quality" in DEFAULTS
 print("✓ config: search-era keys gone, download keys kept")
+
+# ═══ playlist / gallery pages enumerate ALL entries (completeness) ══════════
+CALLS.clear()
+media_obj2, err2 = M._ytdlp_extract("https://tube.example/gallery/42")
+assert media_obj2, err2
+assert media_obj2["title"] == "t"                       # first entry, fully extracted
+assert media_obj2["playlist"]["total"] == 3
+assert [e["title"] for e in media_obj2["playlist"]["entries"]] == ["clip B", "clip C"]
+assert media_obj2["playlist"]["entries"][0]["url"] == "https://youtu.be/b"
+print("✓ gallery: first entry becomes the card, the rest ride along as a list")
+
+# ═══ page recursion stamps referer (hotlink-guarded CDNs) ════════════════════
+import httpx
+_orig = httpx.AsyncClient
+httpx.AsyncClient = Client
+try:
+    out2 = asyncio.run(M.analyze("https://blog.example/page"))
+finally:
+    httpx.AsyncClient = _orig
+assert out2.get("referer") == "https://blog.example/page"
+assert out2.get("found_on_page") == "https://blog.example/page"
+print("✓ page→file: job meta will carry the page as Referer")
+
+# ═══ no header poisoning in yt-dlp opts anymore ══════════════════════════════
+from webfinder.config import DEFAULTS, APP_NAME
+assert "http_headers" not in M.base_yt_opts(), "custom UA would break player clients"
+assert "skip_download" in M.base_yt_opts({"skip_download": True, "extract_flat": "in_playlist"})
+print("✓ base_yt_opts: CLI-clean (no forced UA), cookies/proxy only when set")
 
 print("\nALL VIDEO-CORE FIXTURE TESTS PASSED")

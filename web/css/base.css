@@ -193,11 +193,11 @@ body.rail-min .sidebar { width: var(--rail-w-min); min-width: var(--rail-w-min);
 @keyframes pop-in { from { transform: scale(0); } to { transform: scale(1); } }
 body.rail-min .nav-label, body.rail-min .nav-count { opacity: 0; transform: translateX(-8px); width: 0; min-width: 0; padding: 0; overflow: hidden; }
 .side-foot { display: flex; flex-direction: column; gap: 10px; }
-.collapse-btn { height: 38px; border-radius: 10px; display: flex; align-items: center; justify-content: center; gap: 10px;
+.collapse-btn { height: 38px; border-radius: 12px; display: flex; align-items: center; justify-content: flex-start; gap: 12px;
+  padding: 0 12px;
   color: var(--text-3); border: 1px solid transparent; transition: all var(--t-fast) var(--ease); }
 .collapse-btn svg { width: 16px; height: 16px; transition: transform var(--t-med) var(--ease); }
 .collapse-btn:hover { color: var(--text); background: var(--panel); border-color: var(--panel-border); }
-body.rail-min .collapse-btn svg { transform: rotate(180deg); }
 .speed-widget { display: flex; align-items: center; gap: 9px; padding: 8px 10px; border-radius: 10px;
   background: var(--panel); border: 1px solid var(--panel-border); transition: opacity var(--t-med); }
 .speed-widget .sw-icon { color: var(--ok); display: grid; place-items: center; }

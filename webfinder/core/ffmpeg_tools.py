@@ -114,6 +114,8 @@ async def capture_stream(job, check_flags, publish) -> None:
             "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AVD/2.0"]
     for k, v in headers.items():
         args += [f"-{k.lower()}", v]
+    if job.meta.get("referer"):
+        args += ["-headers", f"Referer: {job.meta['referer']}\r\n"]
     args += ["-i", source]
     if reencode:
         args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",

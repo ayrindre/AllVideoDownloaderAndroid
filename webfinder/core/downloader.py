@@ -259,6 +259,9 @@ class DownloadManager:
         offset = job.resume_offset if dest.exists() else 0
         headers = {"Accept-Encoding": "identity",
                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AVD/2.0"}
+        if job.meta.get("referer"):
+            # hotlink-guarded CDNs (a LOT of tube/file hosts) 403 without it
+            headers["Referer"] = job.meta["referer"]
         if offset:
             headers["Range"] = f"bytes={offset}-"
         mode = "ab" if offset else "wb"
@@ -354,12 +357,23 @@ class DownloadManager:
             "concurrent_fragment_downloads": 4,
             "windowsfilenames": True,
         }
-        # YouTube serves anonymous WEB clients a 640×480-only stream map
-        # ("quality ignores my selection" bug) — lead with the mobile/TV clients
-        # that expose full-resolution formats, then fall back to web.
-        attempts = [base_yt_opts({**core, "extractor_args":
-                                 {"youtube": {"player_client": ["android", "tv", "web"]}}}),
-                    base_yt_opts(core)]
+        # Same philosophy as the analyzer: bare CLI defaults FIRST (that is the
+        # path users prove works in a terminal), then the client rescues — and
+        # if extraction succeeded on a specific player client, reuse THAT exact
+        # recipe first, because format ids are client-scoped (id 137 found via
+        # "tv" must be downloaded via "tv").
+        referer = (job.meta.get("referer") or "").strip()
+        if referer:
+            core["referer"] = referer      # dedicated opt — keeps client headers
+        saved_ea = job.meta.get("extractor_args")
+        attempts = []
+        if saved_ea:
+            attempts.append(base_yt_opts({**core, "extractor_args": saved_ea}))
+        attempts.append(base_yt_opts(core))
+        attempts.append(base_yt_opts({**core, "extractor_args":
+                                      {"youtube": {"player_client": ["android", "tv"]}}}))
+        attempts.append(base_yt_opts({**core, "extractor_args":
+                                      {"youtube": {"player_client": ["ios", "mweb"]}}}))
         last_err: Exception | None = None
         for opts in attempts:
             try:
