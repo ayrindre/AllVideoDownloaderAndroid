@@ -27,12 +27,34 @@ any OS  → python run.py --no-open   (browser mode at http://127.0.0.1:8765)
 | A page that *plays* a video | Deep-scan: `og:video`, `<video>/<source>`, file anchors, Apache *index-of* listings (with sizes) — and when a video URL surfaces, the app **re-analyzes that URL** one level deep and hands you its real card, not a candidate list. |
 | A magnet | Honestly identified; copy it to your torrent client. (This app doesn't fake P2P.) |
 
+Pages whose only video surface is a **cross-origin `<iframe>` player** are not dead
+ends either: the scan records every player-looking iframe as an `embed` candidate and
+the analyzer **hops into the best one** (files first, embeds second) before giving up.
+
 Hotlink-guarded CDNs (a lot of file hosts and tube sites) get the hosting page sent as
 **Referer** automatically — analyze found the file on a page, the download inherits it.
 Failures are honest: a bot-walled platform returns the *actual* extractor error, **plus a
 "Deep-scan anyway" button that digs the page for plain file links regardless** — and the
 two fixes that work (browser cookies source; Settings → System → *Update yt-dlp now*,
 mirroring the daily automatic refresh `run.py` performs at launch).
+
+## "My terminal downloads 4K but the app offers 480p"
+
+Two causes, both handled structurally now:
+
+1. **Stale bundled copy.** The app's private yt-dlp (in its venv) ages a week =
+   blocked clients = capped ladders. On launch it pip-upgrades itself daily — and if
+   PyPI is unreachable (filtered networks), the app now **detects a newer `yt-dlp`
+   on your PATH and drives that binary directly** for extraction *and* downloads
+   (flag-mapped 1:1, progress streamed back through `--progress-template`).
+   Terminal parity by construction. Settings → System shows which engine is live;
+   *Update now* forces a refresh attempt.
+2. **Chrome's cookie DB.** Since Chrome 127 (App-Bound Encryption) / while Chrome is
+   running, `--cookies-from-browser chrome` can die with *"Could not copy Chrome
+   cookie database"* — and that error used to abort **every** analysis. Now a cookie
+   failure transparently retries the whole ladder anonymously, the error card names
+   the cause (close Chrome fully, or pick `edge`/`firefox`), and only then do you see
+   a blocked-site verdict.
 
 ## Features that survived the pivot — and got better
 

@@ -146,8 +146,11 @@
     return card("System", "Runtime health.", "cpu",
       el("div", { class: "set-row" },
         el("div", { class: "sr-txt" },
-          el("b", {}, `yt-dlp extractor · ${m.system.yt_dlp || "not installed"}`),
-          el("span", {}, "YouTube changes its API weekly — if your terminal's yt-dlp works but the app does not, this is the gap. The app also refreshes itself once a day at launch.")),
+          el("b", {}, `yt-dlp extractor · ${m.system.yt_dlp || "not installed"}`
+            + (m.system.yt_dlp_engine?.use_cli ? "  ·  🖥 your system CLI (active)" : "")),
+          el("span", {}, m.system.yt_dlp_engine?.use_cli
+            ? "The app found a NEWER yt-dlp on your PATH and is driving that binary directly — terminal parity by construction. Update it there (or click Update now to also refresh the app's private copy)."
+            : "YouTube changes its API weekly. If your terminal's yt-dlp works but the app does not, the app's bundled copy is stale — hit Update now (or install a fresh yt-dlp on PATH and restart: the app prefers it automatically).")),
         upd),
       el("div", { style: { marginTop: 8 } },
         el("div", { class: "kv" }, el("span", { class: "k" }, "App"), el("span", { class: "v" }, `${m.app} ${m.version}`)),

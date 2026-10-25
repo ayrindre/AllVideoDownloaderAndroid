@@ -30,6 +30,11 @@ from ..config import settings
 from . import filekind as fk
 from .ffmpeg_tools import find_ffmpeg, probe
 
+
+def ytcli_use_cli() -> bool:
+    from . import ytcli
+    return ytcli.use_cli()
+
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36 AVD/2.0"
 
 
@@ -237,9 +242,17 @@ async def analyze(url: str, _depth: int = 0) -> dict:
     ie = await asyncio.to_thread(find_extractor, url)
     if ie:
         hints = []
+        e_low = (yt_err or "").lower()
+        if "cookie" in e_low or "could not copy" in e_low:
+            hints.append("Your browser is <b>holding its cookie database open</b> (Chrome 127+ also App-Bound-encrypts it) — "
+                         "fully close Chrome (check the tray), or switch the source to <code>edge</code>/<code>firefox</code> in "
+                         "Settings → Video & capture. The app already retried this extraction without cookies.")
         if not settings.get("ytdlp_browser_cookies"):
             hints.append("Set Settings → Video & capture → <b>Browser cookies source</b> to <code>chrome</code>/<code>edge</code> so yt-dlp can use your logged-in session.")
         hints.append("The app auto-refreshes yt-dlp daily — if it just updated, restart All Video Downloader once.")
+        if not ytcli_use_cli():
+            hints.append("Tip: if <code>yt-dlp</code> in your terminal works better, install it on PATH and restart — "
+                         "All Video Downloader prefers your newer system binary over its bundled copy automatically.")
         try:                                # the extractor said no — the page may
             cand = await scan_page(url)     # still carry a plain file/manifest
         except Exception:  # noqa: BLE001
@@ -315,18 +328,25 @@ async def analyze(url: str, _depth: int = 0) -> dict:
     vids = [c for c in candidates
             if fk.classify(c["url"]) == "video"
             or fk.url_extension(c["url"]) in fk.VIDEO_EXTS | fk.STREAM_EXTS]
-    if vids and _depth < 2:
-        vids.sort(key=lambda c: (-int(c.get("size_bytes") or 0),
-                                 0 if fk.url_extension(c["url"]) in fk.STREAM_EXTS else 1))
+    emb = [c for c in candidates if c.get("file_type") == "embed"]
+    targets = vids + emb          # plain files first, scripted players second
+    if targets and _depth < 2:
+        targets.sort(key=lambda c: (-int(c.get("size_bytes") or 0),
+                                    0 if fk.url_extension(c["url"]) in fk.STREAM_EXTS else 1))
         try:
-            sub = await analyze(vids[0]["url"], _depth + 1)
+            yt_err_referrer["url"] = final
+            try:
+                sub = await analyze(targets[0]["url"], _depth + 1)
+            finally:
+                yt_err_referrer.clear()
             if sub.get("kind") not in ("page", "magnet"):
                 sub["found_on_page"] = final
                 # most tube/CDN file links are hotlink-guarded: the download
                 # needs the hosting page as Referer to answer like the browser
                 sub["referer"] = final
-                if len(vids) > 1:
-                    sub["also_found"] = vids[1:12]
+                rest = targets[1:12]
+                if rest:
+                    sub["also_found"] = rest
                 return sub
         except Exception:  # noqa: BLE001 — fall through to the plain page card
             pass
@@ -345,6 +365,8 @@ def _magnet_title(url: str) -> str:
 _QUALITY_ORDER = (4320, 2880, 2160, 1440, 1080, 720, 480, 360, 240, 144)
 
 
+yt_err_referrer: dict = {}      # {'url': hosting page} while analyze recurses
+
 _CLIENT_ATTEMPTS = (
     {},                                                  # bare CLI behaviour first
     {"player_client": ["android", "tv"]},                # rescue: web map capped?
@@ -352,8 +374,25 @@ _CLIENT_ATTEMPTS = (
 )
 
 
-def _attempt_extract(url: str, mode: dict) -> tuple[dict | None, str, dict]:
-    """Run the client ladder for one URL; returns (info, error, winning client)."""
+def _merge_infos(infos: list[tuple[dict, dict]]) -> tuple[dict, dict]:
+    """Richest response wins; the others only add missing format ids."""
+    infos.sort(key=lambda ci: -len((ci[1] or {}).get("formats") or []))
+    win_client, info = infos[0]
+    seen: set = set()
+    merged: list[dict] = []
+    for _, cand in infos:
+        for f in (cand or {}).get("formats") or []:
+            fid = f.get("format_id")
+            if fid not in seen:
+                seen.add(fid)
+                merged.append(f)
+    info = dict(info)
+    info["formats"] = merged
+    return info, (win_client or {})
+
+
+def _module_attempt(url: str, mode: dict, *, no_cookies: bool = False
+                    ) -> tuple[dict | None, str, dict]:
     try:
         import yt_dlp
     except ImportError:
@@ -364,6 +403,8 @@ def _attempt_extract(url: str, mode: dict) -> tuple[dict | None, str, dict]:
         extra = dict(mode)
         if client_extra:
             extra["extractor_args"] = {"youtube": client_extra}
+        if no_cookies:
+            extra["cookiesfrombrowser"] = None      # falsy → yt-dlp skips the read
         try:
             with yt_dlp.YoutubeDL(base_yt_opts(extra)) as ydl:
                 infos.append((client_extra, ydl.extract_info(url, download=False)))
@@ -377,19 +418,55 @@ def _attempt_extract(url: str, mode: dict) -> tuple[dict | None, str, dict]:
             break                                       # listing worked; no rescue needed
     if not infos:
         return None, " · ".join(dict.fromkeys(errors)) or "yt-dlp returned nothing", {}
-    infos.sort(key=lambda ci: -len((ci[1] or {}).get("formats") or []))
-    win_client, info = infos[0]
-    seen: set = set()
-    merged: list[dict] = []
-    for _, cand in infos:
-        for f in (cand or {}).get("formats") or []:
-            fid = f.get("format_id")
-            if fid not in seen:
-                seen.add(fid)
-                merged.append(f)
-    info = dict(info)
-    info["formats"] = merged
-    return info, "", (win_client or {})
+    info, win = _merge_infos(infos)
+    return info, "", win
+
+
+def _cli_attempt(url: str, mode: dict) -> tuple[dict | None, str, dict]:
+    """System yt-dlp binary — used when the user's CLI is FRESHER than the app's
+    pip copy (the usual cause of 'terminal downloads 4K, the app offers 480p')."""
+    from . import ytcli
+    flat = mode.get("extract_flat") == "in_playlist"
+    items = mode.get("playlist_items")
+    np = bool(mode.get("noplaylist", True))
+    infos: list[tuple[dict, dict]] = []
+    errors: list[str] = []
+    for client_extra in _CLIENT_ATTEMPTS:
+        info, err = ytcli.extract(url, flat=flat, playlist_items=items, noplaylist=np,
+                                  client=client_extra or None,
+                                  referer=mode.get("_referer", ""))
+        if info is None:
+            errors.append(err)
+            continue
+        infos.append((client_extra, info))
+        fmap = info.get("formats") or []
+        if fmap and max((f.get("height") or 0) for f in fmap) > 480:
+            break
+        if info.get("_type") == "playlist":
+            break
+    if not infos:
+        return None, " · ".join(dict.fromkeys(errors)) or "yt-dlp CLI returned nothing", {}
+    info, win = _merge_infos(infos)
+    return info, "", win
+
+
+def _attempt_extract(url: str, mode: dict) -> tuple[dict | None, str, dict]:
+    """Client ladder for one URL; engine = pip module OR the user's system CLI.
+
+    Chrome's locked/encrypted cookie DB (yt-dlp issue 7271) once bricked EVERY
+    extraction with 'Could not copy Chrome cookie database' — so a cookie-read
+    failure now transparently retries anonymous instead of dying on every site.
+    """
+    from . import ytcli
+    if ytcli.use_cli():
+        return _cli_attempt(url, mode)
+    info, err, win = _module_attempt(url, mode)
+    if (info is None and err and ytcli._ERR_MARKERS.search(err)
+            and (settings.get("ytdlp_browser_cookies") or "").strip()):
+        info2, err2, win2 = _module_attempt(url, mode, no_cookies=True)
+        if info2 is not None:
+            return info2, "", win2
+    return info, err, win
 
 
 def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
@@ -397,6 +474,9 @@ def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
     mode = {"skip_download": True, "extract_flat": "in_playlist",
             "noplaylist": False, "playlist_items": "1-25", "socket_timeout": 15}
     info, err, win_client = _attempt_extract(url, mode)
+    if info is None and yt_err_referrer.get("url"):
+        mode["_referer"] = yt_err_referrer["url"]      # retry with page context
+        info, err, win_client = _attempt_extract(url, mode)
     if not info:
         return None, err
 
@@ -525,6 +605,8 @@ async def _try_ytdlp(url: str) -> tuple[dict | None, str]:
 _OG_RE = re.compile('<meta[^>]+property=["\']og:(?:video|audio|image)(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']', re.I)
 _VIDSRC_RE = re.compile('<(?:video|source)[^>]+src=["\']([^"\']+)["\']', re.I)
 
+_IFRAME_RE = re.compile('<iframe[^>]+src=["\']([^"\']+)["\']', re.I)
+
 async def scan_page(url: str, limit: int = 12, wanted=None) -> list[dict]:
     """Deep-scan one page for hidden direct media files.
 
@@ -563,6 +645,22 @@ async def scan_page(url: str, limit: int = 12, wanted=None) -> list[dict]:
         _push(urljoin(str(resp.url), unescape_html(m.group(1))))
     for m in _re.finditer(_VIDSRC_RE, text):
         _push(urljoin(str(resp.url), unescape_html(m.group(1))))
+    # iframe players — many (most?) tube/porn embed pages only expose the real
+    # player through a cross-origin iframe; we hand it to the analyzer as an
+    # "embed" candidate and hop into it ourselves when nothing better exists.
+    for m in _re.finditer(_IFRAME_RE, text):
+        src = urljoin(str(resp.url), unescape_html(m.group(1)))
+        if not src.startswith("http") or src in seen:
+            continue
+        low = src.lower()
+        if not any(t in low for t in ("video", "embed", "player", "watch", "media", "/vid")):
+            continue
+        seen.add(src)
+        from urllib.parse import urlparse as _up
+        pr = _up(src)
+        out.append({"url": src,
+                    "filename": f"embed · {pr.netloc}{pr.path[:36]}",
+                    "file_type": "embed", "size_bytes": None})
     # plain file anchors + directory listings (name  <tab> size)
     for m in _re.finditer(MEDIA_HREF_RE, text):
         href = unescape_html(m.group(1))

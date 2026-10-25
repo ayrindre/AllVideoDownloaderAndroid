@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import sys
 import types
@@ -213,5 +214,91 @@ from webfinder.config import DEFAULTS, APP_NAME
 assert "http_headers" not in M.base_yt_opts(), "custom UA would break player clients"
 assert "skip_download" in M.base_yt_opts({"skip_download": True, "extract_flat": "in_playlist"})
 print("✓ base_yt_opts: CLI-clean (no forced UA), cookies/proxy only when set")
+
+# ═══ cookie-DB failure must NOT brick every site: retry without cookies ═════
+from webfinder.config import settings as _st
+from webfinder.core import ytcli as YT
+assert YT._vparse("2026.10.21") > YT._vparse("2024.08.06")
+assert YT._vparse("2026.3.5") > YT._vparse("2026.3.4")
+print("✓ version compare: dot-date releases ordered numerically")
+
+_orig_st = _st.get("ytdlp_browser_cookies")
+_st.update({"ytdlp_browser_cookies": "chrome"})
+_seen_opts: list[dict] = []
+class CookieYDL:
+    def __init__(self, opts):
+        _seen_opts.append(opts)
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def extract_info(self, url, download=False):
+        if self.opts_key():
+            raise RuntimeError("ERROR: [youtube] Could not copy Chrome cookie database. "
+                               "See https://github.com/yt-dlp/yt-dlp/issues/7271")
+        return INFO
+    def opts_key(self):
+        return _seen_opts[-1].get("cookiesfrombrowser")
+fake_yt.YoutubeDL = CookieYDL
+got, gerr, gwin = M._module_attempt("https://youtu.be/x", {"skip_download": True})
+assert got is None                      # ALL passes poisoned by the cookie read
+info2, err2, _ = M._attempt_extract("https://youtu.be/x", {"skip_download": True})
+assert info2 and info2.get("formats"), (err2, info2)
+assert any(o.get("cookiesfrombrowser") is None for o in _seen_opts[-3:]), _seen_opts[-3:]
+_st.update({"ytdlp_browser_cookies": _orig_st})
+fake_yt.YoutubeDL = _YDL                 # restore the sane stub for later tests
+print("✓ cookie-DB wall: analyzer auto-retries anonymously (every site not bricked)")
+
+# ═══ newer system CLI ⇒ extraction routes to the binary, not the stale module ═
+_calls: list[dict] = []
+def fake_extract(url, **kw):
+    _calls.append({"url": url, **kw})
+    return (INFO if len(_calls) == 1 else None), "nope"
+_orig_use, _orig_ext = YT.use_cli, YT.extract
+YT.use_cli = lambda: True
+YT.extract = fake_extract
+try:
+    media_cli, _ = M._ytdlp_extract("https://youtu.be/cli")
+finally:
+    YT.use_cli, YT.extract = _orig_use, _orig_ext
+assert media_cli and media_cli["formats"], media_cli
+assert _calls and _calls[0]["flat"] is True and _calls[0]["noplaylist"] is False
+print("✓ system-CLI engine: extraction routes through the fresh binary (flags mapped)")
+
+# ═══ iframe-players on embed pages become hop targets ═══════════════════════
+EMBED_HTML = """<html><body>
+<iframe src="//players.example.io/embed/video/9x8q" width=640 height=360></iframe>
+</body></html>"""
+_resp_cache = {}
+class EmbedResp(Resp):
+    def __init__(self, url): super().__init__(EMBED_HTML, url="https://tube.example/watch/1")
+class EmbedClient(Client):
+    def _r(self, url):
+        if "players.example" in url:      # the embed resolves to a real mp4 host
+            return _done(Resp("", url=url, headers={"content-type": "video/mp4",
+                                                     "content-length": "50000000"}))
+        return _done(EmbedResp(url))
+    def head(self, url, **k): return self._r(url)
+    def get(self, url, headers=None, **k): return self._r(url)
+httpx.AsyncClient = EmbedClient
+try:
+    out3 = asyncio.run(M.analyze("https://tube.example/watch/1"))
+finally:
+    httpx.AsyncClient = _orig
+assert out3["kind"] == "direct" and "players.example" in out3["url"], out3
+assert out3.get("found_on_page") == "https://tube.example/watch/1"
+print("✓ embed hop: iframe player resolved → real file card with page provenance")
+
+# ═══ CLI download command mirrors the analysis recipe ════════════════════════
+YT.detect.cache_clear()
+os.environ["AVD_YTDLP_BIN"] = "yt-dlp"
+args = YT.download_cmd("https://youtu.be/x", outdir="/d", outstem="t",
+                       fmt="137+140/bestvideo[height<=1080]", container="mp4",
+                       referer="https://page.example/v", client={"player_client": ["android", "tv"]})
+blob = " ".join(args)
+assert "-f 137+140/bestvideo[height<=1080] --merge-output-format mp4" in blob
+assert "--referer https://page.example/v" in blob
+assert "youtube:player_client=android,tv" in blob
+assert "--progress-template" in blob and "AVDPROG" in blob
+del os.environ["AVD_YTDLP_BIN"]
+print("✓ download_cmd: fmt/referer/client/progress-template all wired")
 
 print("\nALL VIDEO-CORE FIXTURE TESTS PASSED")

@@ -52,16 +52,18 @@ class SettingsPatch(BaseModel):
 @router.get("/meta")
 async def meta():
     ff = find_ffmpeg()
-    try:
-        from yt_dlp.version import __version__ as ytdlp_version
-    except Exception:  # noqa: BLE001 — not installed / stale package layout
-        ytdlp_version = None
+    from ..core import ytcli
+    engine = ytcli.detect()
+    ytdlp_version = engine["cli_version"] if engine["use_cli"] else (engine["module_version"] or None)
     return {
         "app": APP_NAME, "version": APP_VERSION,
         "platform": platform.system(), "python": platform.python_version(),
         "system": {
             "ffmpeg": ff,
             "yt_dlp": ytdlp_version,
+            "yt_dlp_engine": {"use_cli": engine["use_cli"], "exe": engine["exe"],
+                              "module_version": engine["module_version"],
+                              "cli_version": engine["cli_version"]},
             "desktop": bool(os.environ.get("WEBFINDER_DESKTOP")),
         },
         "config_file": str(CONFIG_FILE),
@@ -127,6 +129,8 @@ async def selfupdate():
         raise HTTPException(504, "pip timed out — network blocked? Try again or install manually.")
     except OSError as exc:
         raise HTTPException(500, f"pip could not run: {exc}")
+    from ..core import ytcli
+    ytcli.detect.cache_clear()      # re-eval module-vs-system preference
     # read the NEW version in a child process (this one still has the old import cached)
     new_v = "?"
     try:

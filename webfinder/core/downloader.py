@@ -313,10 +313,79 @@ class DownloadManager:
     # ------------------------------------------------------------------
     # Worker: yt-dlp media download (runs in a thread — its API is sync)
     # ------------------------------------------------------------------
+    # Worker: yt-dlp via the USER's system binary (kept fresh outside pip —
+    # the answer to "my terminal works, the app doesn't")
+    # ------------------------------------------------------------------
+    def _ytdlp_cli_thread(self, job: DownloadJob) -> None:
+        import subprocess as _sp
+        from . import ytcli
+        d = ytcli.detect()
+        parent = Path(str(job.filepath)).parent
+        stem = Path(str(job.filename)).stem[:120] or "download"
+        args = ytcli.download_cmd(
+            job.url, outdir=str(parent), outstem=stem,
+            fmt=job.meta.get("format") or "bv*+ba/b",
+            container=settings.get("default_container", "mp4"),
+            referer=(job.meta.get("referer") or "").strip(),
+            client=(job.meta.get("extractor_args") or {}).get("youtube"),
+            playlist=bool(job.meta.get("playlist")))
+        try:
+            proc = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
+                             encoding="utf-8", errors="ignore")
+        except OSError as exc:
+            raise RuntimeError(f"system yt-dlp could not run: {exc}") from None
+        assert proc.stdout is not None
+        tail: list[str] = []
+        last = time.time()
+        for raw in proc.stdout:
+            line = raw.strip()
+            if line.startswith("AVDPROG "):
+                parts = line.split()[1:]
+                def _n(i: int) -> float:
+                    try:
+                        return float(parts[i]) if parts[i] not in ("NA", "") else 0.0
+                    except (IndexError, ValueError):
+                        return 0.0
+                try:
+                    pct = float(parts[0].strip("% "))
+                except (IndexError, ValueError):
+                    pct = 0.0
+                done, total, speed = _n(1), _n(2) or _n(3), _n(4)
+                if total:
+                    job.set_progress(int(done), int(total), speed or None)
+                if pct:
+                    job.progress_pct = pct
+                if speed:
+                    job.speed = speed
+                if time.time() - last >= 0.25:
+                    last = time.time()
+                    self.publish(job)
+            elif line:
+                tail.append(line)
+                del tail[:-8]
+            if job._cancel.is_set():
+                proc.terminate()
+                break
+        rc = proc.wait()
+        if job._cancel.is_set():
+            raise asyncio.CancelledError()
+        if rc not in (0, None):
+            msg = " · ".join(tail[-3:]) or f"exit {rc}"
+            if ytcli._ERR_MARKERS.search(msg):
+                msg += " — cookie DB unreadable (close Chrome fully / pick edge in Settings)"
+            raise RuntimeError(f"[system yt-dlp] {msg[:300]}")
+        self._settle_ytdlp_file(job, parent, stem)
+
+
+    # ------------------------------------------------------------------
     async def _run_ytdlp(self, job: DownloadJob) -> None:
         await asyncio.to_thread(self._ytdlp_thread, job)
 
     def _ytdlp_thread(self, job: DownloadJob) -> None:
+        from . import ytcli
+        if ytcli.use_cli():
+            self._ytdlp_cli_thread(job)
+            return
         try:
             import yt_dlp
         except ImportError as exc:
