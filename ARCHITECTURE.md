@@ -88,6 +88,24 @@ WS client auto-falls back to `GET /api/downloads` polling (1.4 s) whenever the s
 | `sim` | deterministic-ish fake transfer (seeded RNG wobble), writes a real placeholder file, drives the identical UI path |
 
 ### Vertical search (`core/verticals.py`)
+Five dedicated verticals — images, videos, torrents, e-books, archives — each a parallel
+fan-out over real file indexes with per-source error capture (`{results, sources}`):
+torrents ride `apibay.org`'s JSON (info_hash → magnet augmented with live trackers, seeders,
+size) + Nyaa RSS + a lenient 1337x row scrape (stable `/torrent/{id}.torrent` links);
+e-books ride `gutendex.com` and Internet Archive's `advancedsearch`→`metadata` pair
+(prefers .pdf → .epub → .djvu download URLs); archives dork three engines and pass every
+row through `_archive_relevant()` — extension-in-url/title or "index of" — the hard gate
+that killed the "web results instead of files" problem. `core/tls.py` wraps optional
+`curl_cffi` (Chrome JA3) for ALL Google traffic; absent it, engines degrade to httpx +
+dual-UA attempts.
+
+Peril history: `_ytdlp_extract` once returned a bare 14-key dict where callers unpack
+`media, yt_err = …` — every SUCCESSFUL YouTube parse died with
+"too many values to unpack (expected 2, got 14)". DOM handlers must capture
+`e.currentTarget` **before** awaiting: it is null once dispatch ends, which silently
+broke the Copy-link flash/toast path.
+
+
 `search_images` / `search_videos` fan out to the engines' own media indexes in parallel:
 DDG needs a two-step handshake (fetch `duckduckgo.com/?q=…&ia=images` → extract `vqd` token →
 call `i.js`/`v.js?o=json`), Bing Images embeds escaped-JSON per item (`m="{&quot;murl&quot;…}"`)

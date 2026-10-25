@@ -61,23 +61,29 @@ Module map and API reference: **[ARCHITECTURE.md](ARCHITECTURE.md)**
 
 ## 3. How the smart logic works
 
-### True media verticals (images & videos)
-Selecting a single **Image** or **Video** chip switches from web search to the engines'
-*media indexes*, so you get the files themselves — not pages about them:
+### True media verticals (images · videos · torrents · e-books · archives)
+Selecting a single file-type chip switches from web search to that type's dedicated
+*index sources*, so you get the files themselves — not pages about them:
 
 | | Sources | Direct fields | Filters |
 |---|---|---|---|
 | **Images** | DuckDuckGo `i.js` JSON · Bing Images · Google `tbm=isch` | full-res URL (IDM-ready), thumb, w×h, source page | size ≥800/HD/4K · aspect · color · kind (photo/clipart/line/GIF/B&W) |
 | **Videos** | DuckDuckGo `v.js` JSON · Bing Videos · dorked web as third source | playable media URL, thumb, duration, publisher | length (<4m / 4–20m / >20m) · min height |
+| **Torrents** | The Pirate Bay (`apibay.org` JSON) · Nyaa RSS · 1337x | **magnet link** (Copy → your client), seeders/leechers/size, `.torrent` file save | min seeders |
+| **E-Books** | Project Gutenberg (`gutendex`) · Internet Archive (search + metadata) | direct EPUB/PDF file URL, cover, author, year | format (EPUB/PDF/DjVu) |
+| **Archives** | Bing + DuckDuckGo + Mojeek with `intitle:"index of"` dorks, **hard-relevance-gated** | only file URLs & directory listings survive — pages *about* zips are dropped | — |
+
+The **Magnet** chip merged into **Torrent**: one chip searches both `.torrent` files and
+magnet links; every card leads with **Copy magnet / Copy direct link** (IDM-safe).
 
 Filters live in the **⚙ Filters** popover next to the engine pills (color/kind ride Bing's
 index, size & aspect are also enforced locally); **SafeSearch is OFF by default** with a
 one-click pill next to it, and every source fails independently — a blocked engine shows
-as `blocked` in the source strip instead of killing the search. Google scraping ships with
-the `CONSENT`/`SOCS` cookies + `gbv=1` that make it actually parseable (`Google 0 hits` was
-the consent wall) with a legacy-user-agent second attempt that gets Google's JS-free basic
-layout, and DuckDuckGo falls back to its `lite` markup bucket when the main HTML endpoint
-comes back empty.
+as `blocked` in the source strip instead of killing the search. Google traffic now leads
+with **`curl-cffi`** — a real Chrome TLS/JA3 fingerprint plus the `CONSENT`/`SOCS` cookies
+and `gbv=1` — which defeats the "200 OK but zero results" fingerprint wall; without the
+package installed it degrades to httpx with a legacy-user-agent retry. DuckDuckGo falls
+back to its `lite` markup bucket when the main HTML endpoint comes back empty.
 
 **No garbage, ever.** If Image-only (or Video-only) finds zero media, WebFinder does **not**
 quietly swap in irrelevant web pages — it shows an *indexes-blocked* panel listing what each
@@ -167,6 +173,8 @@ iscc build\installer.iss            # → Setup wizard (optional bundled ffmpeg 
 | Window "hangs" / log floods `AccessibilityObject… recursion` | Older builds exposed the window object on the `js_api` bridge, which pywebview recursively scans — fixed (bridge now uses a private `_window`; `tools/test_desktop_contract.py` guards it). Any machine can use `browser.bat` as an instant escape hatch. |
 | Console flashes and closes on `run.py` double-click | Use **`run.bat`** (manages the venv and keeps the window open on errors). `run.py` with a bare system Python now pauses with instructions instead of vanishing. |
 | `A WebFinder backend is already running` | That is intentional: `run.py` detects a live backend on the port and attaches the browser to it instead of double-binding (no more `Only one usage of each socket address`). |
+| Copy button "does nothing" on media cards | Fixed: handlers now capture `e.currentTarget` before `await` (the DOM nulls it after dispatch). |
+| Dragging the titlebar didn't move the window / maximize never restored | Fixed: header carries pywebview's `.pywebview-drag-region` selector (CSS `-webkit-app-region` is a no-op in WebView2) and the bridge reads the LIVE native `WindowState` instead of pywebview's static `maximized` flag. Double-click the titlebar toggles maximize too. |
 | Proxy env vars make the app ignore its own localhost | All self-probes (`run.py`, desktop launcher) now bypass the system proxy (`ProxyHandler({{})}`). |
 
 ## 6. Responsible use
