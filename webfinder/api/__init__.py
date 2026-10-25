@@ -146,17 +146,20 @@ async def search(body: SearchRequest):
         kind = body.types[0]
         vf = (body.filters or {}).get("images" if kind == "image" else "videos") or {}
         fn = verticals.search_images if kind == "image" else verticals.search_videos
-        vdata = await fn(body.query, vf, limit, safe)
-        if vdata["results"]:
-            data = {
-                "query": body.query, "raw_query": body.query, "types": body.types,
-                "mode": "images" if kind == "image" else "videos",
-                "elapsed_ms": int((time.time() - t0) * 1000),
-                "filters": vf,
-                "engines": [{"engine": k, "ok": v["ok"], "error": v["error"], "count": v["count"]}
-                            for k, v in vdata["sources"].items()],
-                "results": vdata["results"],
-            }
+        vdata = await fn(body.query, vf, limit, safe, cfg.get("proxy", ""))
+        # NOTE: deliberately NO fallthrough to dorked web search here — mixing
+        # irrelevant web pages into an image/video request is worse than an
+        # honest "indexes blocked" state the UI can explain.
+        data = {
+            "query": body.query, "raw_query": body.query, "types": body.types,
+            "mode": "images" if kind == "image" else "videos",
+            "elapsed_ms": int((time.time() - t0) * 1000),
+            "filters": vf,
+            "vertical_blocked": not vdata["results"],
+            "engines": [{"engine": k, "ok": v["ok"], "error": v["error"], "count": v["count"]}
+                        for k, v in vdata["sources"].items()],
+            "results": vdata["results"],
+        }
 
     if data is None:
         responses = await run_search(body.query, body.types, engines, limit,

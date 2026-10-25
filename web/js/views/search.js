@@ -269,7 +269,28 @@
   function renderMediaGrid(list, mode) {
     const grid = $("#results-grid");
     if (!list.length) {
-      showEmpty("search", "The media indexes came back empty", "Try another wording, more engines, or drop the active filters — verticals index billions of files but they are not every file on the web.");
+      const data = state.lastData || {};
+      const errs = (data.engines || []).filter((e) => !e.ok);
+      grid.classList.remove("grid-media");
+      const box = $("#results-empty");
+      box.classList.remove("hidden");
+      box.innerHTML = "";
+      box.append(el("div", { class: "re-ico", html: ICONS.svg(mode === "videos" ? "video" : "image") }),
+        el("h3", {}, mode === "videos" ? "The video indexes came back empty" : "The image indexes came back empty"),
+        el("p", {}, "WebFinder queries Bing, DuckDuckGo and Google media indexes in parallel. This search is never padded with irrelevant web pages — here is what each index said:"));
+      const why = el("div", { style: { margin: "18px auto 0", maxWidth: "560px", textAlign: "left", display: "grid", gap: 7 } });
+      (data.engines || []).forEach((e) => {
+        why.append(el("div", { class: "notice " + (e.ok ? "info" : "warn"), style: { marginBottom: 0 } },
+          el("span", { class: "dot", style: { width: 8, height: 8, borderRadius: "50%", background: e.ok ? "var(--ok)" : "var(--warn)", flex: "none", marginTop: 5 } }),
+          el("div", {}, el("b", {}, e.engine), e.ok ? ` — ${e.count} results` : ` — ${e.error || "blocked"}`)));
+      });
+      box.append(why);
+      if (errs.length) {
+        box.append(el("p", { style: { marginTop: 16, fontSize: 12 } },
+          "Common causes: your network/ISP blocking a Google or DuckDuckGo endpoint, rate limiting after fast searches, or a captcha wall. Fixes: wait a minute and retry · set Settings → Scrape proxy · keep only the engines that respond."));
+        box.append(el("button", { class: "btn btn-primary", style: { marginTop: 12 },
+          onclick: () => run(), html: `${ICONS.svg("refresh")}<span>Retry now</span>` }));
+      }
       return;
     }
     $("#results-empty").classList.add("hidden");

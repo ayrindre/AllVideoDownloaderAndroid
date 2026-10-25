@@ -376,7 +376,7 @@ def demo_image_results(query: str, limit: int) -> dict:
             "width": w, "height": h, "duration": None, "demo": True,
         })
     return {"query": query, "raw_query": query, "types": ["image"], "mode": "images",
-            "elapsed_ms": 280, "demo": True,
+            "elapsed_ms": 280, "demo": True, "vertical_blocked": False,
             "engines": [{"engine": e, "ok": True, "error": "", "count": 6}
                         for e in ("bing", "duckduckgo", "google")],
             "results": results}
@@ -399,7 +399,7 @@ def demo_video_results(query: str, limit: int) -> dict:
             "duration": [95, 244, 1210, 58][i % 4], "publisher": "DemoTube", "demo": True,
         })
     return {"query": query, "raw_query": query, "types": ["video"], "mode": "videos",
-            "elapsed_ms": 320, "demo": True,
+            "elapsed_ms": 320, "demo": True, "vertical_blocked": False,
             "engines": [{"engine": e, "ok": True, "error": "", "count": 4}
                         for e in ("duckduckgo", "bing", "web_dorks")],
             "results": results}

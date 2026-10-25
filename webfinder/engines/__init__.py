@@ -124,6 +124,8 @@ async def search_duckduckgo(client: httpx.AsyncClient, query: str, limit: int, s
             break
     if not out:
         out = await _ddg_lite(client, query, limit, safe)
+    if not out and "anomaly" in resp.text:
+        raise RuntimeError("DuckDuckGo rate-limited this IP (bot anomaly page)")
     return out
 
 
@@ -175,19 +177,16 @@ async def search_bing(client: httpx.AsyncClient, query: str, limit: int, safe: b
     return out
 
 
-async def search_google(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
-    # Without these cookies Google serves the EU consent interstitial — the #1
-    # reason "Google 0 hits" happens. gbv=1 forces the classic parseable layout.
-    client.cookies.update({"CONSENT": "YES+cb.20220419-08-p0.en.LX.ALL", "SOCS": "CAI"})
-    resp = await client.get(
-        "https://www.google.com/search",
-        params={"q": query, "num": min(max(limit, 30), 100), "hl": "en", "gl": "us",
-                "gbv": 1, "safe": "active" if safe else "off"},
-    )
-    resp.raise_for_status()
+GOOGLE_CONSENT_COOKIES = {"CONSENT": "YES+cb.20220419-08-p0.en.LX.ALL",
+                          "SOCS": "CAISHAgBEhJnd3NfMjAyMjA0MjAtMF9SQzIaAmRlIAEaBgiA_LyuBg"}
+# An ancient UA makes Google serve the JS-free "basic HTML" layout with stable
+# /url?q= anchors — the most scrape-robust SERP Google still ships.
+GOOGLE_LEGACY_UA = "Mozilla/5.0 (Windows NT 6.1) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/41.0.2228.0 Safari/537.36"
+
+
+def _parse_google_html(html: str, limit: int) -> list[dict]:
     out: list[dict] = []
-    # The consent/noscript variant still contains /url?q= redirects + titles.
-    for m in re.finditer(r'<a[^>]*href="/url\?q=([^&"]+)[^"]*"[^>]*>(.*?)</a>', resp.text, re.S):
+    for m in re.finditer(r'<a[^>]*href="/url\?q=([^&"]+)[^"]*"[^>]*>(.*?)</a>', html, re.S):
         url = unescape(unquote(m.group(1)))
         if not url.startswith("http") or "google." in urlparse(url).netloc:
             continue
@@ -197,9 +196,37 @@ async def search_google(client: httpx.AsyncClient, query: str, limit: int, safe:
         out.append(_mk_result(url, title, ""))
         if len(out) >= limit:
             break
-    if not out and ("captcha" in resp.text.lower() or "unusual traffic" in resp.text.lower()):
-        raise RuntimeError("Google flagged this IP (CAPTCHA). Try Bing/DuckDuckGo or a proxy.")
+    if not out:
+        # Modern layout: <h3> wrapped in a direct external link.
+        for m in re.finditer(r'<a[^>]*href="(https?://(?!.*google\.)[^"]+)"[^>]*>\s*<h3[^>]*>(.*?)</h3>', html, re.S):
+            url = unescape(m.group(1))
+            out.append(_mk_result(url, _clean(m.group(2)), ""))
+            if len(out) >= limit:
+                break
     return out
+
+
+async def search_google(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
+    params = {"q": query, "num": min(max(limit, 30), 100), "hl": "en", "gl": "us",
+              "gbv": 1, "safe": "active" if safe else "off", "filter": 0}
+    client.cookies.update(GOOGLE_CONSENT_COOKIES)
+    resp = await client.get("https://www.google.com/search", params=params)
+    resp.raise_for_status()
+    out = _parse_google_html(resp.text, limit)
+    if out:
+        return out
+    # Second attempt with the legacy user-agent → JS-free basic layout.
+    resp = await client.get("https://www.google.com/search", params=params,
+                            headers={"User-Agent": GOOGLE_LEGACY_UA})
+    out = _parse_google_html(resp.text, limit)
+    if out:
+        return out
+    low = resp.text[:6000].lower()
+    if "captcha" in low or "unusual traffic" in low or "sorry" in str(resp.url):
+        raise RuntimeError("Google flagged this IP (CAPTCHA) — retry later, add a proxy, or rely on Bing")
+    if "consent.google" in resp.text[:4000]:
+        raise RuntimeError("Google consent wall reached (cookies ignored in this region)")
+    return []
 
 
 async def search_yandex(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
@@ -223,18 +250,23 @@ async def search_yandex(client: httpx.AsyncClient, query: str, limit: int, safe:
 
 async def search_mojeek(client: httpx.AsyncClient, query: str, limit: int, safe: bool = False) -> list[dict]:
     resp = await client.get("https://www.mojeek.com/search", params={"q": query})
+    if resp.status_code in (403, 429):
+        raise RuntimeError(f"Mojeek anti-bot ({resp.status_code}) — consider a proxy or disable it")
     resp.raise_for_status()
     out: list[dict] = []
     patterns = (
-        r'<a class="ob"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?(?:<p>(.*?)</p>)?',   # 2023 layout
-        r'<h2 class="title[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>\s*</h2>',  # current layout
+        r'<a class="ob"[^>]*href="([^"]+)"[^>]*>(.*?)</a>.*?(?:<p>(.*?)</p>)?',       # 2023 layout
+        r'<a[^>]*class="title"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',                     # current layout
+        r'<h2 class="title[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>(.*?)</a>\s*</h2>',     # nested variant
     )
-    rx = next((re.compile(p, re.S) for p in patterns if re.search(p, resp.text)), re.compile(patterns[0], re.S))
+    rx = next((re.compile(p, re.S) for p in patterns if re.search(p, resp.text)), None)
+    if rx is None:
+        return []
     for m in rx.finditer(resp.text):
         url = _strip_redirect(unescape(m.group(1)))
         if not url.startswith("http"):
             continue
-        snippet = _clean(m.group(3)) if m.re.groups >= 3 and m.lastindex and m.lastindex >= 3 else ""
+        snippet = _clean(m.group(3)) if (m.lastindex or 0) >= 3 else ""
         out.append(_mk_result(url, _clean(m.group(2)), snippet))
         if len(out) >= limit:
             break

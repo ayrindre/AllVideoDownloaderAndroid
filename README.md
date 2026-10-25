@@ -75,8 +75,18 @@ index, size & aspect are also enforced locally); **SafeSearch is OFF by default*
 one-click pill next to it, and every source fails independently — a blocked engine shows
 as `blocked` in the source strip instead of killing the search. Google scraping ships with
 the `CONSENT`/`SOCS` cookies + `gbv=1` that make it actually parseable (`Google 0 hits` was
-the consent wall), and DuckDuckGo falls back to its `lite` markup bucket when the main HTML
-endpoint comes back empty.
+the consent wall) with a legacy-user-agent second attempt that gets Google's JS-free basic
+layout, and DuckDuckGo falls back to its `lite` markup bucket when the main HTML endpoint
+comes back empty.
+
+**No garbage, ever.** If Image-only (or Video-only) finds zero media, WebFinder does **not**
+quietly swap in irrelevant web pages — it shows an *indexes-blocked* panel listing what each
+source said (captcha / bot wall / markup change), plus the fixes that actually work: wait a
+minute, enable **Settings → Scrape proxy** (also applied to the media indexes), or retry.
+On networks where Google/DuckDuckGo endpoints are filtered, Bing Images alone usually still
+works — and if it is the one that failed, the parser speaks all three Bing markup
+generations (legacy entity-escaped `m="{&quot;…}"`, raw JSON `m='{"murl":…}'`, and the
+stable `/images/async` fragment endpoint).
 
 ### Interaction model
 Typing a **bare URL into the main search box routes it straight into the Smart Direct

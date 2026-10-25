@@ -93,9 +93,15 @@ DDG needs a two-step handshake (fetch `duckduckgo.com/?q=…&ia=images` → extr
 call `i.js`/`v.js?o=json`), Bing Images embeds escaped-JSON per item (`m="{&quot;murl&quot;…}"`)
 plus server-side `qft` filter tokens, Google isch is regex-scraped after un-escaping `\u002F`.
 Results normalize to `{title,url,thumb,page,width,height,duration,engine,file_type,is_direct}`;
-local post-filters (size/aspect/duration/min-res) run after merge, then dedupe. Zero vertical
-results ⇒ the API transparently falls back to dorked web search so the user never sees an empty
-screen when only the verticals got blocked.
+local post-filters (size/aspect/duration/min-res) run after merge, then dedupe. Parsing is
+lenient-by-design: HTML entities and `\/` escapes are undone first, item fields are pulled
+from the *containing JSON object* (nearest-occurrence wins), so Bing can reshuffle its markup
+without poisoning neighbours' widths/titles. Bing Images tries the `/images/async` fragment
+endpoint, then the full page; Google isch triples tolerate `?w=…`/`%3F` suffixes.
+Zero vertical results ⇒ the API returns `mode + vertical_blocked:true + per-engine errors` and
+the UI renders an honest blocked panel — **never** a dorked web-search fallback, because
+irrelevant pages are worse than an explained empty state. The Settings `proxy` applies to the
+vertical client too.
 
 ### Analysis routing (`core/media.py::analyze`)
 ```
