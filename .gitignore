@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+downloads/
+dist/
+build/exe/
+*.log
+.DS_Store
+webfinder.egg-info/
