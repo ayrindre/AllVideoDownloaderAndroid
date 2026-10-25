@@ -1,26 +1,22 @@
-"""WebFinder — REST + WebSocket API routes."""
+"""All Video Downloader — REST + WebSocket API routes."""
 from __future__ import annotations
 
-import asyncio
 import os
 import platform
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
-from typing import Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from ..config import APP_NAME, APP_VERSION, CONFIG_FILE, settings
-from ..core import dorks as dk
 from ..core import media
-from ..core import verticals
 from ..core.downloader import manager
 from ..core.ffmpeg_tools import find_ffmpeg
-from ..engines import ENGINE_META, run_search
 
 router = APIRouter(prefix="/api")
 
@@ -28,19 +24,11 @@ router = APIRouter(prefix="/api")
 # ---------------------------------------------------------------------------
 # Schemas
 # ---------------------------------------------------------------------------
-class SearchRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=400)
-    types: list[str] = Field(default_factory=list)
-    engines: Optional[list[str]] = None
-    limit: Optional[int] = None
-    filters: dict = Field(default_factory=dict)   # {"images": {...}, "videos": {...}}
-
-
 class DownloadRequest(BaseModel):
     url: str
     filename: str = ""
     title: str = ""
-    kind: str = ""          # http | hls | ytdlp | sim — empty = auto-plan
+    kind: str = ""          # http | hls | ytdlp — empty = auto-plan
     meta: dict = Field(default_factory=dict)
 
 
@@ -72,9 +60,6 @@ async def meta():
     return {
         "app": APP_NAME, "version": APP_VERSION,
         "platform": platform.system(), "python": platform.python_version(),
-        "engines": ENGINE_META,
-        "file_types": {k: {kk: vv for kk, vv in v.items() if kk in ("label", "icon", "color")}
-                       for k, v in dk.FILE_TYPES.items()},
         "system": {
             "ffmpeg": ff,
             "yt_dlp": ytdlp_version,
@@ -91,6 +76,7 @@ async def get_settings():
 
 @router.put("/settings")
 async def put_settings(body: SettingsPatch):
+    import asyncio
     allowed = set(settings.snapshot().keys())
     patch = {k: v for k, v in body.patch.items() if k in allowed}
     merged = settings.update(patch)
@@ -124,125 +110,19 @@ async def open_path(path: str = ""):
     return {"ok": True, "opened": str(target)}
 
 
-# ---------------------------------------------------------------------------
-# Search
-# ---------------------------------------------------------------------------
-def _normalize(url: str) -> str:
-    p = urlparse(url)
-    host = p.netloc.lower().removeprefix("www.")
-    return f"{host}{p.path.rstrip('/')}{'' if not p.query else '?' + p.query[:80]}".lower()
-
-
-# Single-type selections that must hit DEDICATED indexes, never web search.
-VERTICAL_ROUTES: dict[str, tuple[str, str, object]] = {
-    "image":   ("images",   "images",   None),   # fn bound below (import order)
-    "video":   ("videos",   "videos",   None),
-    "torrent": ("torrents", "torrents", None),
-    "ebook":   ("ebooks",   "ebooks",   None),
-    "archive": ("archives", "archives", None),
-    "software":  ("software", "software", None),
-    "audio":     ("audios",   "audios",   None),
-}
-VERTICAL_ROUTES["image"] = VERTICAL_ROUTES["image"][:2] + (verticals.search_images,)
-VERTICAL_ROUTES["video"] = VERTICAL_ROUTES["video"][:2] + (verticals.search_videos,)
-VERTICAL_ROUTES["torrent"] = VERTICAL_ROUTES["torrent"][:2] + (verticals.search_torrents,)
-VERTICAL_ROUTES["ebook"] = VERTICAL_ROUTES["ebook"][:2] + (verticals.search_ebooks,)
-VERTICAL_ROUTES["archive"] = VERTICAL_ROUTES["archive"][:2] + (verticals.search_archives,)
-VERTICAL_ROUTES["software"] = VERTICAL_ROUTES["software"][:2] + (verticals.search_software,)
-VERTICAL_ROUTES["audio"] = VERTICAL_ROUTES["audio"][:2] + (verticals.search_audios,)
-
-
-@router.post("/search")
-async def search(body: SearchRequest):
-    cfg = settings.snapshot()
-    engines = body.engines or [e for e, on in cfg["engines"].items() if on]
-    engines = [e for e in engines if e in ENGINE_META] or ["bing"]
-    limit = min(int(body.limit or cfg["result_limit"]), 200)
-    safe = bool(cfg.get("safe_search"))
-    t0 = time.time()
-    data: dict | None = None
-
-    if cfg["demo_mode"]:
-        _demo_map = {"image": media.demo_image_results, "video": media.demo_video_results,
-                     "torrent": media.demo_torrent_results, "ebook": media.demo_ebook_results,
-                     "archive": media.demo_archive_results, "software": media.demo_software_results,
-                     "audio": media.demo_audio_results}
-        if len(body.types) == 1 and body.types[0] in _demo_map:
-            data = _demo_map[body.types[0]](body.query, limit)
-        else:
-            data = media.build_search_results(body.query, body.types, engines, limit)
-
-    # ── vertical mode: ONE media-file type selected → query dedicated indexes.
-    #    No web fallback ever: garbage pages are worse than an explained empty state.
-    elif len(body.types) == 1 and body.types[0] in VERTICAL_ROUTES:
-        mode, fkey, fn = VERTICAL_ROUTES[body.types[0]]
-        vf = (body.filters or {}).get(fkey) or {}
-        vdata = await fn(body.query, vf, limit, safe, cfg.get("proxy", ""))
-        # NOTE: deliberately NO fallthrough to dorked web search here — mixing
-        # irrelevant web pages into an image/video request is worse than an
-        # honest "indexes blocked" state the UI can explain.
-        data = {
-            "query": body.query, "raw_query": body.query, "types": body.types,
-            "mode": mode,
-            "elapsed_ms": int((time.time() - t0) * 1000),
-            "filters": vf,
-            "vertical_blocked": not vdata["results"],
-            "engines": [{"engine": k, "ok": v["ok"], "error": v["error"], "count": v["count"]}
-                        for k, v in vdata["sources"].items()],
-            "results": vdata["results"],
-        }
-
-    if data is None:
-        responses = await run_search(body.query, body.types, engines, limit,
-                                     proxy=cfg.get("proxy"), safe=safe)
-        results, seen = [], set()
-        # Round-robin across engines so every source is represented fairly.
-        buckets = {r.engine: list(r.results) for r in responses if r.ok}
-        while any(buckets.values()) and len(results) < limit:
-            for name, lst in buckets.items():
-                if not lst:
-                    continue
-                r = lst.pop(0)
-                r["engine"] = name
-                key = _normalize(r["url"])
-                if key in seen:
-                    continue
-                seen.add(key)
-                r["is_direct"] = r.get("is_direct") or r["file_type"] != "link"
-                results.append(r)
-                if len(results) >= limit:
-                    break
-        # rank: direct files first, then size hint, then source order
-        results.sort(key=lambda r: (0 if r.get("is_direct") else 1,
-                                    0 if r.get("size_bytes") else 1))
-        data = {
-            "query": dk.build_query(body.query, body.types),
-            "elapsed_ms": int((time.time() - t0) * 1000),
-            "engines": [{"engine": r.engine, "ok": r.ok, "error": r.error,
-                         "count": len(r.results)} for r in responses],
-            "results": results,
-        }
-
-    # Optional enhancement: crawl the top ambiguous pages for hidden direct links.
-    if data.get("mode") not in ("images", "videos") and cfg.get("resolve_pages") and not cfg["demo_mode"]:
-        targets = [r for r in data["results"] if r.get("file_type") == "link"][:5]
-        scans = await asyncio.gather(*(media.scan_page(r["url"]) for r in targets),
-                                     return_exceptions=True)
-        for r, scan in zip(targets, scans):
-            if isinstance(scan, list) and scan:
-                r["media_candidates"] = scan[:6]
-    for r in data.get("results", []):
-        r.setdefault("snippet", r.get("publisher") or "")
-        r.setdefault("size_bytes", None)
-        r.setdefault("thumb", "")
-        r.setdefault("domain", urlparse(r.get("page") or r.get("url", "")).netloc.removeprefix("www."))
-    data["raw_query"] = body.query
-    data["types"] = body.types
-    return data
+@router.post("/system/exit")
+async def exit_app():
+    """Sidebar Exit: the backend terminates itself; the desktop window dies
+    with it, browser tabs just stop answering."""
+    def _die() -> None:
+        time.sleep(0.35)          # let the HTTP response flush first
+        os._exit(0)
+    threading.Thread(target=_die, daemon=True).start()
+    return {"ok": True, "msg": "All Video Downloader is closing."}
 
 
 # ---------------------------------------------------------------------------
-# Smart direct link
+# Smart link analysis — the whole app hangs off this one endpoint
 # ---------------------------------------------------------------------------
 @router.post("/analyze")
 async def analyze(body: AnalyzeRequest):
@@ -263,16 +143,6 @@ async def analyze_download(body: MediaDownloadRequest):
     return {"job_id": job.id}
 
 
-@router.post("/scan")
-async def scan(body: AnalyzeRequest):
-    if settings.get("demo_mode"):
-        return {"candidates": [{"url": "https://demo.local/files/sample-1080p.mp4",
-                                "filename": "sample-1080p.mp4", "file_type": "video"},
-                               {"url": "https://demo.local/files/sample.zip",
-                                "filename": "sample.zip", "file_type": "archive"}]}
-    return {"candidates": await media.scan_page(body.url)}
-
-
 # ---------------------------------------------------------------------------
 # Downloads
 # ---------------------------------------------------------------------------
@@ -280,12 +150,12 @@ async def scan(body: AnalyzeRequest):
 async def start_download(body: DownloadRequest):
     url = body.url.strip()
     if not url.lower().startswith(("http://", "https://", "magnet:", "ftp://")):
-        raise HTTPException(400, "Only http/https/magnet/ftp URLs can be downloaded.")
+        raise HTTPException(400, "Only http/https/ftp URLs can be downloaded.")
     if url.lower().startswith("magnet:"):
         raise HTTPException(400, "Magnet links are not direct files — copy the link and open it in your torrent client.")
     kind, meta = body.kind, body.meta
     if not kind:
-        plan = await media.plan_download(url, title=body.title)
+        plan = await media.plan_download(url, title=body.title, fmt=meta.get("fmt") or None)
         kind, meta = plan["kind"], {**plan.get("meta", {}), **meta}
     job = manager.enqueue(url=url, kind=kind, filename=body.filename,
                           title=body.title, meta=meta)

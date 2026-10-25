@@ -1,4 +1,4 @@
-/* WebFinder · views/settings.js — everything persisted server-side to settings.json */
+/* All Video Downloader · views/settings.js — everything persisted server-side to settings.json */
 (function () {
   const { $, $$, el, toast, debounce } = window.UI;
   const S = window.Store;
@@ -23,9 +23,9 @@
   function init() {
     const grid = $("#settings-grid");
     grid.innerHTML = "";
-    $("#cfg-path").textContent = S.meta?.config_file || "~/.webfinder/settings.json";
+    $("#cfg-path").textContent = S.meta?.config_file || "~/.avd/settings.json";
 
-    grid.append(secDownloads(), secSearch(), secMedia(), secAppearance(), secSystem());
+    grid.append(secDownloads(), secMedia(), secAppearance(), secSystem());
   }
 
   function card(title, sub, iconName, ...fields) {
@@ -47,7 +47,7 @@
       maxVal.textContent = `${maxRange.value} parallel`;
       save({ max_concurrent: +maxRange.value });
     });
-    return card("Downloads", "Where files land and how hard WebFinder pulls.", "download",
+    return card("Downloads", "Where files land and how hard All Video Downloader pulls.", "download",
       el("div", { class: "field" },
         el("label", { class: "f-label" }, "Download folder"),
         el("div", { class: "input-row" }, dirInput,
@@ -59,31 +59,13 @@
       el("div", { class: "field" },
         el("label", { class: "f-label" }, "Concurrency"),
         el("div", { class: "range-line" }, maxRange, maxVal)),
+      el("div", { class: "field" },
+        el("label", { class: "f-label" }, "Network proxy (optional)"),
+        el("input", { class: "input", placeholder: "http://127.0.0.1:7890 · socks5://user:pass@host:port", value: st.proxy || "", onchange: (e) => save({ proxy: e.target.value.trim() }) }),
+        el("p", { style: { fontSize: "11.5px", color: "var(--text-3)", marginTop: 7, lineHeight: 1.5 } },
+          "Routes downloads, stream capture and yt-dlp through the proxy — useful when a CDN geoblocks you.")),
       setRow("Simulate on network failure", "If the remote host is unreachable, finish the job in simulation so nothing looks broken.",
         switchOpt("simulate_on_network_error", st.simulate_on_network_error)));
-  }
-
-  /* ── search ─────────────────────────────────────────────────────────────── */
-  function secSearch() {
-    const st = S.settings;
-    const engWrap = el("div", { class: "eng-grid" });
-    for (const [key, m] of Object.entries(S.meta.engines)) {
-      engWrap.append(setRow(
-        `<span style="display:inline-flex;align-items:center;gap:7px"><span class="dot" style="width:8px;height:8px;border-radius:50%;background:${m.color};display:inline-block"></span>${m.label}</span>`,
-        `Reliability: ${m.reliability}`,
-        switchOpt(`engines.${key}`, st.engines?.[key], (v) => save({ engines: { [key]: v } }))));
-    }
-    const limitSel = selectOpt(["20", "40", "60", "100"], { "20": "20", "40": "40", "60": "60", "100": "100" }, String(st.result_limit), (v) => save({ result_limit: +v }));
-    return card("Search", "Engines get the raw query plus dork operators for the file types you toggle.", "search",
-      engWrap,
-      el("div", { class: "field", style: { marginTop: 12 } }, el("label", { class: "f-label" }, "Results per search"), limitSel),
-      el("div", { class: "field" },
-        el("label", { class: "f-label" }, "Scrape proxy (optional)"),
-        el("input", { class: "input", placeholder: "http://127.0.0.1:7890 · socks5://user:pass@host:port", value: st.proxy || "", onchange: (e) => save({ proxy: e.target.value.trim() }) })),
-        el("p", { style: { fontSize: "11.5px", color: "var(--text-3)", marginTop: 7, lineHeight: 1.5 } },
-        "Useful when Yandex/Google captcha-wall your residential or datacenter IP."),
-      setRow("Deep-link scan", "Crawl top result pages to reveal hidden direct file links (extra requests, slower but golden for Copy-Link).",
-        switchOpt("resolve_pages", st.resolve_pages)));
   }
 
   /* ── media ──────────────────────────────────────────────────────────────── */
@@ -98,7 +80,7 @@
       { best: "Best available", 2160: "2160p (4K)", 1440: "1440p", 1080: "1080p (FHD)", 720: "720p", 480: "480p" },
       String(st.default_quality), (v) => save({ default_quality: v }));
     const ffPath = el("input", { class: "input", placeholder: "e.g. C:\\Tools\\ffmpeg\\bin", value: st.ffmpeg_path || "", onchange: (e) => save({ ffmpeg_path: e.target.value }) });
-    return card("Media & conversion", "Used by the Smart Direct Link module and stream capture.", "film",
+    return card("Video & capture", "How links are extracted, merged and remuxed.", "film",
       caps,
       el("div", { class: "field" }, el("label", { class: "f-label" }, "Preferred container"), containerSel),
       el("div", { class: "field" }, el("label", { class: "f-label" }, "Default quality"), qualitySel),
@@ -108,7 +90,7 @@
           { "": "None (anonymous)", chrome: "Chrome", edge: "Edge", brave: "Brave", chromium: "Chromium", firefox: "Firefox", vivaldi: "Vivaldi" },
           st.ytdlp_browser_cookies || "", (v) => save({ ytdlp_browser_cookies: v })),
         el("p", { style: { fontSize: "11.5px", color: "var(--text-3)", marginTop: 7, lineHeight: 1.5 } },
-          "When YouTube answers \u201cSign in to confirm you're not a bot\u201d, WebFinder reads your session cookies from that browser (locally, never uploaded) so extraction and downloads work on age/region-gated content. Windows: close Chrome fully after enabling, or it holds the cookie DB.")),
+          "When YouTube answers \u201cSign in to confirm you're not a bot\u201d, All Video Downloader reads your session cookies from that browser (locally, never uploaded) so extraction and downloads work on age/region-gated content. Windows: close Chrome fully after enabling, or it holds the cookie DB.")),
       el("div", { class: "field" },
         el("label", { class: "f-label" }, "FFmpeg folder (optional)"),
         el("div", { class: "input-row" }, ffPath,
@@ -120,7 +102,7 @@
             toast(meta.system.ffmpeg.available ? "FFmpeg detected — streams will capture losslessly." : "Still no FFmpeg at that path.", meta.system.ffmpeg.available ? "ok" : "warn");
           } }, "Re-check")),
         el("p", { style: { fontSize: "11.5px", color: "var(--text-3)", marginTop: 7, lineHeight: 1.5 } },
-          "Windows: ", el("code", {}, "winget install Gyan.FFmpeg"), " then restart WebFinder. Needed for .m3u8/.mpd capture and for merging separate audio+video streams.")));
+          "Windows: ", el("code", {}, "winget install Gyan.FFmpeg"), " then restart All Video Downloader. Needed for .m3u8/.mpd capture and for merging separate audio+video streams.")));
   }
 
   /* ── appearance ─────────────────────────────────────────────────────────── */
@@ -151,9 +133,7 @@
   function secSystem() {
     const st = S.settings;
     const m = S.meta;
-    return card("System", "Runtime health & demo data.", "cpu",
-      setRow("Demo mode", "Synthetic search results & simulated transfers — the full UI pipeline without touching the network.",
-        switchOpt("demo_mode", st.demo_mode)),
+    return card("System", "Runtime health.", "cpu",
       el("div", { style: { marginTop: 8 } },
         el("div", { class: "kv" }, el("span", { class: "k" }, "App"), el("span", { class: "v" }, `${m.app} ${m.version}`)),
         el("div", { class: "kv" }, el("span", { class: "k" }, "Shell"), el("span", { class: "v" }, m.system.desktop ? "pywebview · frameless · WebView2" : "browser dev mode")),

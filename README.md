@@ -1,223 +1,73 @@
-# 🔦 WebFinder
+<div align="right">
 
-**A premium dark-glass Windows desktop app for multi-engine file search, smart downloading and stream capture — Python backend, HTML/CSS/JS frontend.**
+**All Video Downloader** — یک‌کاره، دقیق، فارم‌پسند.
 
-Search **nine engines** (Google · Bing · DuckDuckGo · Startpage · Brave · Ecosia · Yandex · Mojeek · Marginalia) for **videos, images, audio, torrents, magnets, installers and archives**, grab direct download links for IDM, capture `.m3u8` streams with **FFmpeg**, and paste any media URL (YouTube & friends) into the **Smart Direct Link** module powered by **yt-dlp** — all inside one buttery-smooth, hardware-accelerated window.
+</div>
 
-**Windows — double-click [`run.bat`](run.bat).** It creates `.venv`, installs
-requirements (and yt-dlp) on first run, then launches the app — no commands needed.
+# All Video Downloader
 
-Or manually:
+One job, done properly: **paste any link that contains a video — get the file, at the quality you chose.**
+
+The app used to be a dork-powered meta search *and* a downloader. It is now deliberately
+one thing, and that one thing is engineered hard.
 
 ```
-python -m venv .venv
-.venv\Scripts\activate            # Windows   (source .venv/bin/activate on Linux/macOS)
-pip install -r requirements.txt
-python run.py                     # → frameless pywebview window (falls back to browser)
+Windows → double-click run.bat      (venv + deps + FFmpeg auto-install, first run only)
+any OS  → python run.py --no-open   (browser mode at http://127.0.0.1:8765)
 ```
 
-To produce a single-file `dist\WebFinder.exe`, double-click [`build.bat`](build.bat)
-(it installs PyInstaller into the venv and runs `build/webfinder.spec`).
+## What "any link" actually covers
 
-> The UI speaks **English only**, by design, everywhere.
-
----
-
-## 1. Which Python ↔ HTML bridge? (and why)
-
-| Option | Verdict |
+| The link looks like | What the engine does |
 |---|---|
-| **pywebview + FastAPI/uvicorn** ✅ **chosen** | Native Windows shell via **Edge WebView2 (Chromium)** → real GPU compositing, `backdrop-filter` glassmorphism, 60 fps CSS animations. Supports `frameless=True` for the custom titlebar, JS→Python API for window buttons and native folder dialogs, and it degrades to “just a web app” for dev. |
-| Eel | Great for tiny tools; it *wraps* a Chrome app-mode window — weaker window control (no first-class frameless/custom chrome API), and its `eel.js` bridge couples JS calls to Python functions one-by-one. Our WebSocket progress stream would be awkward on it. |
-| PyQtWebEngine / Qt6 | Most control, but ships a ~170 MB Qt+Chromium runtime, a GPL flavor question, and a heavier dev loop. Overkill when Chromium is already built into Windows 10/11 via WebView2. |
+| YouTube / Vimeo / TikTok / ~1,900 sites | yt-dlp, **three client passes** (android+tv → ios+mweb → web) until the format map stops lying; maps merged by richest-first. Quality chips carry **exact format IDs** (`137+140/…`), so "picked 1080p, got 480p" is structurally impossible. |
+| A raw `.mp4/.mkv/.webm/…` URL | Content-type **and magic bytes** (`ftyp`/EBML/FLV/RIFF) are checked; streamed with HTTP Range resume through the built-in manager. No yt-dlp detour when there's nothing to detour from. |
+| `.m3u8` / `.mpd` manifests | The master is fetched and **parsed locally**: every variant/representation becomes a selectable rung (height + bitrate, real rep-ids for DASH). Chosen rung → yt-dlp (muxes the separate audio track!); no yt-dlp → FFmpeg `-c copy` on exactly that variant playlist. |
+| A page that *plays* a video | Deep-scan: `og:video`, `<video>/<source>`, file anchors, Apache *index-of* listings (with sizes) — and when a video URL surfaces, the app **re-analyzes that URL** one level deep and hands you its real card, not a candidate list. |
+| A magnet | Honestly identified; copy it to your torrent client. (This app doesn't fake P2P.) |
 
-The architecture keeps the frontend **100% HTTP + WebSocket** (`/api/*`, `/ws`) instead of a magic JS bridge, so the exact same HTML/CSS/JS runs in a plain browser (fast iteration: edit file → reload) **and** inside the native window. pywebview only *adds*: frameless chrome, native dialogs, single process.
+Failures are honest: a bot-walled platform returns the *actual* extractor error with the
+two fixes that work (browser cookies source; the daily automatic `yt-dlp` refresh that
+`run.py` performs on its own).
 
-## 2. Architecture at a glance
+## Features that survived the pivot — and got better
+
+- **Download manager** — pause/resume with Range resume, retry, per-job speed + global
+  stats, FFmpeg worker for streams with `-c copy` (no re-encode), concurrency dial.
+- **Network proxy** (Settings → Downloads) now routes *everything*: downloads, manifest
+  fetches, page scans, yt-dlp, and the FFmpeg child process.
+- **FFmpeg installs itself** into the app folder when missing (opt-out
+  `WEBFINDER_NO_FFMPEG_INSTALL=1`).
+- **Native frameless window** via pywebview/WebView2 (drag, maximize, folder picker);
+  the sidebar's red **Exit** terminates the backend cleanly.
+- Settings migrate automatically from `~/.webfinder` to `~/.avd` on first launch —
+  retired search keys are dropped, never resurrected.
+
+## Layout
 
 ```
-┌───────────────────────────── WebFinder.exe (PyInstaller) ─────────────────────────────┐
-│                                                                                          │
-│  web/  (static HTML + CSS + vanilla JS ES modules — no build step)                      │
-│   ├─ titlebar (custom window frame, -webkit-app-region drag)                             │
-│   ├─ sidebar rail · view router · results grid · download manager · settings             │
-│   ▼                                                                                      │
-│  HTTP/JSON  +  WebSocket progress stream  ──►  FastAPI (uvicorn, in-process thread)      │
-│                                                 ├─ /api/search   → engines/ (httpx)       │
-│                                                 │    Google · Bing · DDG · Startpage ·    │
-│                                                 │    Brave · Ecosia · +5    + dorks/core  │
-│                                                 ├─ /api/downloads → core/downloader.py    │
-│                                                 │    ├─ http  : httpx stream, Range-resume │
-│                                                 │    ├─ hls   : core/ffmpeg_tools.py       │
-│                                                 │    ├─ ytdlp : yt-dlp API + progress hooks│
-│                                                 │    └─ sim   : simulated worker (demo)    │
-│                                                 └─ /api/analyze → core/media.py            │
-│                                                      yt-dlp metadata → resolutions UI     │
-│  pywebview window (WebView2) ◄── serves 127.0.0.1:8765, frameless, min-size clamped      │
-└──────────────────────────────────────────────────────────────────────────────────────────┘
+run.py / run.bat            launcher (deps, FFmpeg bootstrap, yt-dlp daily refresh)
+webfinder/
+├─ api/                     REST routes: /analyze, /analyze/download, /downloads…, /system/exit
+├─ config.py                ~/.avd/settings.json (+ one-shot migration)
+├─ core/
+│  ├─ media.py              THE brain: sniff → ladder → yt-dlp matrix → plan_download
+│  ├─ filekind.py           URL→file-type taxonomy (the search-less descendant of dorks)
+│  ├─ downloader.py         job manager: http | hls | ytdlp workers
+│  ├─ ffmpeg_tools.py       capture_stream (variant-aware), probe
+│  └─ ffmpeg_setup.py       auto-fetch of the official FFmpeg build
+├─ desktop/                 pywebview shell + js bridge
+└─ web/                     frontend (Direct · Downloads · Settings)
+tools/test_video_core.py    manifest ladders, sniffing, picker ids, page-rescan loopback
+tools/test_desktop_contract.py
 ```
 
-Module map and API reference: **[ARCHITECTURE.md](ARCHITECTURE.md)**
+## Tests
 
-## 3. How the smart logic works
-
-### True media verticals (images · videos · audio · torrents · e-books · archives · software)
-Selecting a single file-type chip switches from web search to that type's dedicated
-*index sources*, so you get the files themselves — not pages about them. This routing is
-**unconditional** — the old `vertical_mode` kill-switch was removed because a stale
-`"vertical_mode": false` in an existing `settings.json` silently degraded every media
-vertical back to plain web search:
-
-| | Sources | Direct fields | Filters |
-|---|---|---|---|
-| **Images** | DuckDuckGo `i.js` JSON · Bing Images · Google `tbm=isch` | full-res URL (IDM-ready), thumb, w×h, source page | size ≥800/HD/4K · aspect · color · kind (photo/clipart/line/GIF/B&W) |
-| **Videos** | **YouTube search itself** (`ytInitialData` JSON) · DuckDuckGo `v.js` · Bing Videos · dorked web *hard-gated to real media URLs* + **deep-scan rescue** (page hits are crawled for the `.mp4/.mkv` they actually host) | playable URL or watch-page (both feed the yt-dlp downloader), thumb, duration, channel | length (<4m / 4–20m / >20m) · min height |
-| **Audio** | Internet Archive audio items (direct MP3/FLAC via the metadata resolver) · ccMixter JSON API (CC-licensed, direct MP3) · audio-file dorks gated to real extensions + deep-scan | direct file URL with size + duration, item page | kind (mp3/flac/ogg/…) |
-| **Torrents** | The Pirate Bay (`apibay.org` JSON) · Nyaa RSS · 1337x · Torlock | **magnet link** (Copy → your client), seeders/leechers/size, `.torrent` file save | min seeders |
-| **E-Books** | Gutenberg · Internet Archive · Open Library (IA-linked files only) · Standard Ebooks (OPDS) | direct EPUB/PDF file URL, cover, author, year | format (EPUB/PDF/DjVu) |
-| **Archives** | every web engine × **three** parallel strategies (`intitle:"index of"`, `filetype:` dorks, `(zip OR rar OR 7z) download`), hard-relevance-gated, plus deep-scan rescue that crawls promising pages for the archives they link | only file URLs & directory listings survive — pages *about* zips are dropped | — |
-| **Software** | GitHub Releases API (real installer assets) · F-Droid APKs · gated portable-file dorks | `.exe/.msi/.apk/.dmg/…` direct downloads with size + repo, source page | — |
-
-The **Magnet** chip merged into **Torrent**: one chip searches both `.torrent` files and
-magnet links; every card leads with **Copy magnet / Copy direct link** (IDM-safe).
-
-Filters live in the **⚙ Filters** popover next to the engine pills (color/kind ride Bing's
-index, size & aspect are also enforced locally); **SafeSearch is OFF by default** with a
-one-click pill next to it, and every source fails independently — a blocked engine shows
-as `blocked` in the source strip instead of killing the search. Google traffic now leads
-with **`curl-cffi`** — a real Chrome TLS/JA3 fingerprint plus the `CONSENT`/`SOCS` cookies
-and `gbv=1` — which defeats the "200 OK but zero results" fingerprint wall; without the
-package installed it degrades to httpx with a legacy-user-agent retry. DuckDuckGo falls
-back to its `lite` markup bucket when the main HTML endpoint comes back empty.
-
-**SafeSearch actually toggles.** Bing's image/video endpoints ignore the `adlt=off` URL
-param unless the profile cookie agrees — WebFinder sets `SRCHHPGUSR=ADLT=Off` on the wire,
-DuckDuckGo gets both `s=` and `safeSearch=`, and YouTube search gets its strict-mode `sp`
-### Getting past “all engines blocked”
-
-Web engines rate-limit hard, so the fan-out itself is engineered: every call uses a fresh
-desktop fingerprint, a 429/403/TLS-drop gets one or two **backoff retries**, and engines that
-are *proven* bot-walled enter a **40 s cool-down** — skipped instantly (the strip shows
-“cooling down 32 s”) instead of burning time, and re-tested automatically afterwards. The
-eight web engines now run **staggered** (≈0.2 s apart) so a single fan-out looks like human
-scrolling instead of a DDoS burst. Startpage fronts the Google index from a European domain,
-Brave and Ecosia run independent/Bing-backed stacks, and Marginalia indexes the deep
-file-directory web that the majors filter out — one blocked gateway no longer means no results.
-token when SafeSearch is ON. OFF means OFF.
-
-**No garbage, ever.** If Image-only (or Video-only) finds zero media, WebFinder does **not**
-quietly swap in irrelevant web pages — it shows an *indexes-blocked* panel listing what each
-source said (captcha / bot wall / markup change), plus the fixes that actually work: wait a
-minute, enable **Settings → Scrape proxy** (also applied to the media indexes), or retry.
-On networks where Google/DuckDuckGo endpoints are filtered, Bing Images alone usually still
-works — and if it is the one that failed, the parser speaks all three Bing markup
-generations (legacy entity-escaped `m="{&quot;…}"`, raw JSON `m='{"murl":…}'`, and the
-stable `/images/async` fragment endpoint).
-
-### Interaction model
-Typing a **bare URL into the main search box routes it straight into the Smart Direct
-Link analyzer** (that's what it is — not a search query). Once a search runs, the hero
-folds into a compact sticky command bar: the query stays editable, and the file-type
-chips + engine pills stay one click from the results — toggling a chip re-runs the search
-automatically. Each section (Search / Direct / Downloads / Settings) is a true page —
-never stacked.
-
-### Multi-engine search + dork operators
-`core/dorks.py` maps each file-type chip to real search operators (`filetype:mkv OR …`,
-`inurl:magnet "xt=urn:btih"`, …). The aggregator fans the augmented query out to every enabled
-engine **in parallel**, unwraps redirect URLs, dedupes, extracts size hints from snippets,
-classifies each hit by extension heuristics, and round-robins engines so no single source
-dominates. `resolve_pages` additionally crawls the top web-page results to reveal *hidden
-direct file links* — those get their own **Copy link / Download** buttons on the card.
-
-### Smart Download routing (`core/media.py → core/downloader.py`)
-1. **Direct file** (`.mp4 .mkv .zip .exe .torrent …`) → httpx streaming worker: 256 KB chunks,
-   `Content-Length`/`Content-Range` totals, **HTTP Range resume** on pause→resume, UI events
-   throttled to ~4/s. **Cancel removes the job from the list** (the worker can never resurrect
-   its row: a removed job is muted before it publishes); **retry** re-queues from error/cancelled.
-2. **HLS/DASH stream** (`.m3u8`, `.mpd`, `mpegurl` content-type) → **FFmpeg worker**: ffprobe
-   probes duration, `ffmpeg -i URL -c copy -bsf:a aac_adtstoasc -movflags +faststart out.mp4`
-   (lossless remux into your preferred container; `libx264` re-encode only when asked). Progress
-   parses ffmpeg's `-progress pipe:1` microsecond clock, so the bar moves in real time.
-   No FFmpeg? The app says so precisely and everything else keeps working.
-3. **Media-platform URL** (YouTube, Vimeo, TikTok, ~1800 sites) → **yt-dlp**: metadata + per-height
-   resolution table is returned to a *format picker card*; the chosen
-   `bestvideo[height<=1080]+bestaudio/best[height<=1080]` string streams through yt-dlp's API
-   with `progress_hooks` feeding the same live UI pipeline as every other job.
-   The download **leads with the `android`/`tv` player clients** (the anonymous `web` client is
-   served a 640×480-capped stream map — that is why "1080p" used to arrive as 480p), a real
-   browser `User-Agent` rides every request, and output uses a **fixed basename** (`<title>.%(ext)s`
-   is *not* used): when the job settles, the app points itself at the real merged file on disk,
-   correcting extension drift (`.webm`→`.mp4`) so reveal-in-folder, size math and stats all agree.
-4. **Magnet** → copied/opened with your torrent client (never faked as a direct file).
-5. **Extraction refused** (YouTube's "Sign in to confirm you're not a bot", age/region
-   gates) → the analyzer now says so: a red card quoting yt-dlp's own error, with the two
-   fixes it actually has — **Settings → Media → Browser cookies source** (reads your
-   Chrome/Edge/Firefox session locally, so logged-in + gated videos work) and
-   `pip install -U yt-dlp`. Failed web clients are auto-retried against yt-dlp's mobile
-   players for both analysis and downloads.
-
-Every job exposes **Pause · Resume · Retry · Cancel · Copy source URL · Open in folder**, plus a
-one-click **Copy Download Link** on every result card — paste-ready for IDM/NDM/aria2.
-
-### Graceful demo mode
-`Settings → Demo mode` synthesizes search results and *simulates* transfers through the identical
-worker/progress path (also: real downloads that hit an unreachable host auto-switch to a flagged
-`simulated` run). This makes the whole app demo-able offline and makes this sandbox preview alive.
-
-## 4. UI / UX system
-
-- **Design language** — deep charcoal `#121212`, glass panels (`backdrop-filter: blur(22px) saturate()` +
-  layered translucent gradients), accent presets (neon **violet→electric-blue** default, azure, magenta, mint —
-  one `data-accent` attribute re-tints glows, gradients and focus rings instantly).
-- **Motion** — one shared spring-ish easing `cubic-bezier(.34,1.56,.64,1)` and 160/260/420 ms tiers;
-  sliding sidebar indicator, chip pop-check, card lift + spotlight follow-cursor, gradient-halo focus on the
-  search bar, shimmering skeleton cards, striped animated progress + sheen sweeps, toast spring-ins,
-  `prefers-reduced-motion` respected. First paint runs with transitions suppressed (`.preload`) — zero flash.
-- **Custom frame** — borderless window, in-HTML titlebar with drag region and hover-lit
-  min/max/close controls (red glow close, per spec), background ambient orbs + film grain behind the glass.
-- **Panels** — collapsible icon rail (state persisted), centered hero search that morphs into a
-  sticky results header, Direct-Link workbench with radar loader, Download Manager with stat cards +
-  live sparkline canvas, and a settings wall persisted to `~/.webfinder/settings.json`.
-  Keyboard: `/` focuses search, `Ctrl+1..4` switch panels, `Esc` returns to hero.
-
-## 5. Windows: install, ffmpeg, packaging
-
-```powershell
-winget install Gyan.FFmpeg          # stream capture & quality merging
-pyinstaller build/webfinder.spec    # → dist\WebFinder.exe (single file, no console)
-iscc build\installer.iss            # → Setup wizard (optional bundled ffmpeg folder)
+```bash
+python tools/test_video_core.py           # fixture-tested engine (no network)
+python tools/test_desktop_contract.py     # pywebview bridge hygiene
 ```
 
-`run.py --browser` serves the same UI to your default browser for styling work.
-`.venv` and `downloads/` are git-ignored; nothing else needs configuring — settings live in `%USERPROFILE%\.webfinder\settings.json`.
-
-### Troubleshooting
-
-| Symptom | Fix |
-|---|---|
-| Window "hangs" / log floods `AccessibilityObject… recursion` | Older builds exposed the window object on the `js_api` bridge, which pywebview recursively scans — fixed (bridge now uses a private `_window`; `tools/test_desktop_contract.py` guards it). Any machine can use `browser.bat` as an instant escape hatch. |
-| Console flashes and closes on `run.py` double-click | Use **`run.bat`** (manages the venv and keeps the window open on errors). `run.py` with a bare system Python now pauses with instructions instead of vanishing. |
-| `A WebFinder backend is already running` | That is intentional: `run.py` detects a live backend on the port and attaches the browser to it instead of double-binding (no more `Only one usage of each socket address`). |
-| "Open folder" said *only available in the desktop app* | That toast was a catch-all, not the truth: the folder was tracked under the *planned* filename while yt-dlp's merge renames the file, so the reveal call 404'd. Fixed on both sides — settled real paths + a reveal that walks up to the nearest existing folder and opens the downloads dir as last resort (works in browser mode too: the server is your machine). |
-| Verticals (image/video/torrent/ebook/archive) behave like plain web search after a pull | Two causes, both fixed: a stored `vertical_mode:false` gate (removed — routing is now unconditional) and WebView2 serving **cached stale JS** (`/static` now sends `Cache-Control: no-cache` and revalidates via ETag). Restart the app once after pulling to pick both up. |
-| Stats "Saved" doesn't match the files on disk | Completed jobs now reconcile `done`/`total` to the real `st_size` after the final rename; in-progress jobs intentionally show transfer bytes, and time-based (simulated) jobs never count into "Saved". |
-| All engines blocked / 429 | The app retries with backoff, cools the walled engines for 40 s and fans out to nine engines instead of four. If your ISP filters Google (Bing-only networks), keep Startpage/Brave/Ecosia checked — and add a proxy in Settings; it reroutes every engine and the verticals. |
-| Chosen YouTube resolution ignored | Format chips now carry **real yt-dlp format IDs** (`137+140/…`), not just selectors; yt-dlp self-refreshes daily (YouTube changes weekly). If the analyzer offers nothing above 480p, the host is serving a capped map — set a Browser-cookies source in Settings → Media. |
-| Few web results | Web engines now page: Bing RSS `first=` up to 4 pages, Google up to 4 `start=` pages on the fingerprinted path, Mojeek 3 pages; default `result_limit` raised 60→100. Engines you unchecked in Settings stay unchecked — the strip shows what actually ran. |
-| Video/torrent search returned unrelated web pages | The dorked-web source inside the video (and software) verticals is now **hard-gated**: a result only survives if its URL ends in a real media/program extension or is a playable watch-page. Bing's RSS endpoint happily ignores `filetype:` — that is where LinkedIn/profile spam used to leak from. |
-| Quality choice ignored (everything was 640×480) | YouTube caps the *format map* it shows anonymous `web`-client requests. The analyzer now queries the `android`/`tv` clients first and **merges whichever answer is richer**, and downloads lead with the mobile client too — the picker's 1080p/2160p entries now actually exist. If a video still downloads at 480p, set **Settings → Media → Browser cookies source** (uses your logged-in browser session — the definitive fix). |
-| No FFmpeg on the machine | The launcher **downloads and verifies** official FFmpeg builds (gyan.dev on Windows, BtbN on Linux) into the app's own `bin/` on first run — nothing to install by hand. Opt out with `WEBFINDER_NO_FFMPEG_INSTALL=1`; macOS gets a `brew install ffmpeg` hint instead. The HLS worker also retries once per job via the same auto-heal. |
-| Stats "Saved" tile showed literal `<i> MB</i>` | That HTML lived in a `textContent` sink; the formatter now emits plain text. |
-| Copy button "does nothing" on media cards | Fixed: handlers now capture `e.currentTarget` before `await` (the DOM nulls it after dispatch). |
-| Dragging the titlebar didn't move the window / maximize never restored | Fixed: header carries pywebview's `.pywebview-drag-region` selector (CSS `-webkit-app-region` is a no-op in WebView2) and the bridge reads the LIVE native `WindowState` instead of pywebview's static `maximized` flag. Double-click the titlebar toggles maximize too. |
-| Proxy env vars make the app ignore its own localhost | All self-probes (`run.py`, desktop launcher) now bypass the system proxy (`ProxyHandler({{})}`). |
-
-## 6. Responsible use
-
-WebFinder is an aggregator over public search engines and public URLs. It neither hosts nor
-indexes content — **you are responsible for what you download**; respect copyright, licenses and
-each site's terms. Scraping is best-effort: engines may rate-limit you (the app shows *which* one
-failed instead of hiding it), and a `proxy` setting can be pointed at your own egress.
-
-*GPL-3.0 (see LICENSE). Not affiliated with Google, Bing, Yandex, DuckDuckGo, Startpage, Brave, Ecosia, Marginalia, Mojeek, IDM, FFmpeg or yt-dlp.*
+*GPL-3.0 (see LICENSE). Not affiliated with Google, FFmpeg or yt-dlp. Download what you
+have the right to download.*

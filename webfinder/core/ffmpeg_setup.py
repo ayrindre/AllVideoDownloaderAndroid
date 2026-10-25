@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Callable
 
 BIN_DIR = Path(__file__).resolve().parents[2] / "bin"
-_UA = "Mozilla/5.0 (WebFinder ffmpeg-setup)"
+_UA = "Mozilla/5.0 (AVD ffmpeg-setup)"
 
 _BUILDS = {
     "win32": ("https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip", "zip"),

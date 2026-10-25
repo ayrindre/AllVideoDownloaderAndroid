@@ -1,4 +1,4 @@
-"""WebFinder — FastAPI application factory.
+"""All Video Downloader — FastAPI application factory.
 
 Serves the REST + WebSocket API and the static frontend from one port, so
 the same server works headless (browser dev), inside pywebview (Windows) or

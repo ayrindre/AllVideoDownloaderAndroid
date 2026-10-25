@@ -1,55 +1,41 @@
-"""WebFinder — configuration & persistent settings.
+"""All Video Downloader — configuration & persistent settings.
 
-Settings live in ~/.webfinder/settings.json so the packaged EXE stays portable.
+Settings live in ~/.avd/settings.json so the packaged EXE stays portable.
+The old WebFinder settings file is migrated once, on first launch, so an
+upgrade keeps your download folder, proxy and cookie preferences.
 """
 from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 import threading
 from pathlib import Path
 from typing import Any
 
-APP_NAME = "WebFinder"
-APP_VERSION = "1.0.0"
-CONFIG_DIR = Path(os.environ.get("WEBFINDER_HOME", Path.home() / ".webfinder"))
+APP_NAME = "All Video Downloader"
+APP_VERSION = "2.0.0"
+CONFIG_DIR = Path(os.environ.get("AVD_HOME") or os.environ.get("WEBFINDER_HOME")
+                  or Path.home() / ".avd")
 CONFIG_FILE = CONFIG_DIR / "settings.json"
+_LEGACY_FILE = Path.home() / ".webfinder" / "settings.json"
 
 DEFAULTS: dict[str, Any] = {
     # --- downloads -------------------------------------------------------
-    "download_dir": str(Path.home() / "Downloads" / "WebFinder"),
+    "download_dir": str(Path.home() / "Downloads" / "All Video Downloader"),
     "max_concurrent": 3,
     "chunk_size_kb": 256,
     "simulate_on_network_error": True,   # graceful demo fallback
-    # --- search ----------------------------------------------------------
-    "engines": {
-        "google": True,
-        "bing": True,
-        "duckduckgo": True,
-        "yandex": False,
-        "mojeek": True,
-        "startpage": True,
-        "brave": True,
-        "ecosia": True,
-        "marginalia": True,
-    },
-    "result_limit": 100,
-    "safe_search": False,                # OFF by default — the user sees everything
-    # NOTE: the old media-vertical kill-switch was deliberately removed — one
-    # media chip ALWAYS routes to its dedicated indexes. A stale
-    # "vertical_mode": false in an existing settings.json must never resurrect it.
-    "proxy": "",                         # optional http/socks proxy for scraping
-    "resolve_pages": True,               # crawl result pages for direct file links
-    # --- media -----------------------------------------------------------
+    "proxy": "",                         # optional http/socks proxy for all transfers
+    # --- video / capture ---------------------------------------------------
     "default_container": "mp4",
     "default_quality": "1080",           # "best" | 2160 | 1440 | 1080 | 720 | 480
     "ffmpeg_path": "",                   # manual override if not on PATH
     "ytdlp_browser_cookies": "",         # ""|chrome|edge|firefox|brave|chromium — defeats paywall/bot walls
-    # --- appearance / misc ------------------------------------------------
+    # --- appearance ----------------------------------------------------------
     "accent": "violet",                  # violet | azure | magenta | mint
     "ambient_effects": True,
-    "demo_mode": False,                  # force synthetic data (UI preview / offline)
 }
 
 _lock = threading.Lock()
@@ -76,10 +62,24 @@ class Settings:
     def load(self) -> None:
         try:
             raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
-            with _lock:
-                self._data = _deep_merge(DEFAULTS, raw)
         except (FileNotFoundError, json.JSONDecodeError, OSError):
-            pass
+            raw = None
+        if raw is None and _LEGACY_FILE.exists():
+            # one-shot migration from the old WebFinder data folder
+            try:
+                CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(_LEGACY_FILE, CONFIG_FILE)
+                raw = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
+            except OSError:
+                raw = None
+        if raw:
+            merged = _deep_merge(DEFAULTS, raw)
+            # keys of the retired search module must never resurrect
+            for dead in ("engines", "result_limit", "safe_search", "resolve_pages",
+                         "demo_mode", "vertical_mode", "file_types"):
+                merged.pop(dead, None)
+            with _lock:
+                self._data = merged
         Path(self._data["download_dir"]).mkdir(parents=True, exist_ok=True)
 
     def save(self) -> None:
@@ -108,10 +108,8 @@ class Settings:
 
     # -- runtime env overrides (used by the sandbox preview) -------------
     def apply_env_overrides(self) -> None:
-        if os.environ.get("WEBFINDER_DEMO") == "1":
-            self.update({"demo_mode": True})
-        if os.environ.get("WEBFINDER_DL_DIR"):
-            self.update({"download_dir": os.environ["WEBFINDER_DL_DIR"]})
+        if os.environ.get("AVD_DL_DIR") or os.environ.get("WEBFINDER_DL_DIR"):
+            self.update({"download_dir": os.environ.get("AVD_DL_DIR") or os.environ["WEBFINDER_DL_DIR"]})
 
 
 settings = Settings()

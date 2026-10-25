@@ -1,4 +1,4 @@
-"""WebFinder — asynchronous download manager.
+"""All Video Downloader — asynchronous download manager.
 
 Job kinds
   http   : plain streaming download (httpx) with HTTP Range resume
@@ -24,7 +24,7 @@ from typing import Any, Callable, Optional
 import httpx
 
 from ..config import settings
-from . import dorks as dk
+from . import filekind as fk
 
 CHUNK = 256 * 1024
 TERMINAL = {"done", "error", "cancelled"}
@@ -107,16 +107,14 @@ class DownloadManager:
     def enqueue(self, *, url: str, kind: str = "http", filename: str = "",
                 title: str = "", file_type: str = "", meta: dict | None = None) -> DownloadJob:
         meta = meta or {}
-        if settings.get("demo_mode"):
-            kind = "sim"
-        filename = filename or dk.guess_filename(url)
+        filename = filename or fk.guess_filename(url)
         dest_dir = Path(settings.get("download_dir", "."))
         dest_dir.mkdir(parents=True, exist_ok=True)
         job = DownloadJob(
             url=url, kind=kind,
             filename=self._unique_name(dest_dir, filename),
             title=title or filename,
-            file_type=file_type or dk.classify(url),
+            file_type=file_type or fk.classify(url),
             meta=meta,
         )
         job.filepath = str(dest_dir / job.filename)
@@ -260,13 +258,15 @@ class DownloadManager:
         dest = Path(str(job.filepath))
         offset = job.resume_offset if dest.exists() else 0
         headers = {"Accept-Encoding": "identity",
-                   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebFinder/1.0"}
+                   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AVD/2.0"}
         if offset:
             headers["Range"] = f"bytes={offset}-"
         mode = "ab" if offset else "wb"
         recent_bytes, last_emit = 0, time.time()
+        px = (settings.get("proxy") or "").strip()
         async with httpx.AsyncClient(follow_redirects=True,
-                                     timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+                                     timeout=httpx.Timeout(30.0, connect=10.0),
+                                     **({"proxy": px} if px else {})) as client:
             async with client.stream("GET", job.url, headers=headers) as resp:
                 if resp.status_code == 416 and dest.exists():
                     job.done = job.total = dest.stat().st_size  # already complete
@@ -422,7 +422,7 @@ class DownloadManager:
         dest.write_text(json.dumps({
             "webfinder": "simulated transfer", "url": job.url,
             "note": "The remote host was unreachable from this environment — "
-                    "WebFinder finished the job in simulation mode.",
+                    "All Video Downloader finished the job in simulation mode.",
         }, indent=2), encoding="utf-8")
         job.progress_pct = 100.0
         self.publish(job)

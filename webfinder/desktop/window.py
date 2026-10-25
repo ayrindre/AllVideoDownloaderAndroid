@@ -1,4 +1,4 @@
-"""WebFinder — pywebview desktop host for Windows.
+"""All Video Downloader — pywebview desktop host for Windows.
 
 Creates a borderless, hardware-accelerated (WebView2/Chromium) window with
 custom traffic-light controls, and exposes a tiny JS API for window control
@@ -109,7 +109,7 @@ def launch(port: int, host: str) -> bool:
 
     bridge = DesktopBridge()
     window = webview.create_window(
-        title="WebFinder",
+        title="All Video Downloader",
         url=f"http://127.0.0.1:{port}",
         js_api=bridge,
         width=1280,

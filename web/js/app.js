@@ -1,18 +1,17 @@
-/* WebFinder · app.js — bootstrap, window chrome, navigation shell */
+/* All Video Downloader · app.js — bootstrap, window chrome, navigation shell */
 (function () {
   const { $, $$, el, toast } = window.UI;
   const S = window.Store;
 
   const NAV = [
-    { view: "view-search", label: "Search", icon: "search", key: "1" },
-    { view: "view-direct", label: "Smart Direct Link", icon: "link", key: "2" },
-    { view: "view-downloads", label: "Downloads", icon: "download", key: "3", badge: true },
-    { view: "view-settings", label: "Settings", icon: "settings", key: "4" },
+    { view: "view-direct", label: "Grab a video", icon: "film", key: "1" },
+    { view: "view-downloads", label: "Downloads", icon: "download", key: "2", badge: true },
+    { view: "view-settings", label: "Settings", icon: "settings", key: "3" },
   ];
 
   /* ── boot ─────────────────────────────────────────────────────────────── */
   async function boot() {
-    $("#brand-logo").innerHTML = ICONS.svg("search")
+    $("#brand-logo").innerHTML = ICONS.svg("download")
       .replace('stroke-width="1.9"', 'stroke-width="2.4" style="width:20px;height:20px;color:#fff"');
     buildTitlebar();
     buildSidebar();
@@ -23,18 +22,16 @@
       S.meta = meta; S.settings = settings;
       window.__WEBFINDER_DESKTOP__ = !!meta.system.desktop;
       applySettings();
-      S.selectedEngines = new Set(Object.entries(settings.engines || {}).filter(([, on]) => on).map(([k]) => k));
       netStatus(true);
       S.emit("ready");
       window.API.ws.connect();
     } catch (e) {
       netStatus(false);
-      toast("Backend unreachable — is `python run.py` running?", "err", { ttl: 8000 });
+      toast("Backend unreachable — is `run.bat` running?", "err", { ttl: 8000 });
       setTimeout(boot, 2500);
       return;
     }
 
-    window.SearchView.init();
     window.DirectView.init();
     window.DownloadsView.init();
     window.SettingsView.init();
@@ -43,8 +40,6 @@
     S.on("nav", (v) => showView(v));
     requestAnimationFrame(() => document.body.classList.remove("preload"));
 
-    // auto-switch net indicator with WS heartbeats
-    S.on("ws", () => {});
     addEventListener("offline", () => netStatus(false));
     addEventListener("online", () => netStatus(true));
   }
@@ -53,7 +48,6 @@
     const st = S.settings;
     document.documentElement.dataset.accent = st.accent || "violet";
     document.documentElement.classList.toggle("no-ambient", !st.ambient_effects);
-    $("#demo-badge").classList.toggle("hidden", !st.demo_mode);
     $("#cfg-path").textContent = S.meta?.config_file || "";
   }
 
@@ -77,22 +71,33 @@
       const next = await runDesktop(bridge.toggleMaximize);
       setMaxIcon(typeof next === "boolean" ? next : !$("#btn-max").dataset.maxed);
     });
-    $("#btn-close").onclick = () => {
-      if (!bridge.isDesktop) { toast("Browser mode — closing the tab instead. Use `python run.py` for the native window.", "info"); return; }
-      runDesktop(bridge.close);
-    };
-    $("#app-version").textContent = `v${S.meta?.version || "1.0"}`;
-    document.title = "WebFinder";
+    $("#btn-close").onclick = () => exitApp();
+    $("#app-version").textContent = `v${S.meta?.version || "2.0"}`;
+    document.title = "All Video Downloader";
   }
   async function runDesktop(fn) { try { return await fn?.(); } catch { /* browser mode */ } }
 
+  /* ── exit (sidebar button + window ✕ share this path) ─────────────────── */
+  let exiting = false;
+  async function exitApp() {
+    if (exiting) return;
+    exiting = true;
+    const overlay = el("div", { id: "exit-overlay" },
+      el("div", { class: "exit-card" },
+        el("div", { class: "exit-ico", html: ICONS.svg("download") }),
+        el("b", {}, "All Video Downloader is closing"),
+        el("p", {}, "Downloads in flight are saved up to the last chunk — resume them next launch.")));
+    document.body.append(overlay);
+    try { await window.API.exit(); } catch { /* server already gone */ }
+    if (window.API.bridge.isDesktop) runDesktop(window.API.bridge.close);
+    setTimeout(() => { try { window.close(); } catch { /* tabs refuse scripted close */ } }, 600);
+  }
+
   function wireWindow() {
     // in the sandbox/browser preview there is no frameless chrome to emulate drag
-    let dragging = false, sx = 0;
     document.querySelector(".titlebar").addEventListener("pointerdown", (e) => {
       if (!window.API.bridge.isDesktop) return;
       if (e.target.closest(".no-drag")) return;
-      dragging = true; sx = e.clientX;
     });
   }
 
@@ -117,15 +122,10 @@
     });
     $("#btn-about").innerHTML = `${ICONS.svg("info")}<span>About</span>`;
     $("#btn-about").addEventListener("click", showAbout);
-    $("#btn-collapse").innerHTML = ICONS.svg("panelLeft");
-    $("#btn-collapse").addEventListener("click", () => {
-      document.body.classList.toggle("rail-min");
-      const collapsed = document.body.classList.contains("rail-min");
-      localStorage.setItem("wf-rail-min", collapsed ? "1" : "");
-    });
-    if (localStorage.getItem("wf-rail-min")) document.body.classList.add("rail-min");
+    $("#btn-exit").innerHTML = `${ICONS.svg("exit")}<span>Exit</span>`;
+    $("#btn-exit").addEventListener("click", exitApp);
     addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && "1234".includes(e.key)) {
+      if ((e.ctrlKey || e.metaKey) && "123".includes(e.key)) {
         e.preventDefault();
         showView(NAV[+e.key - 1].view);
       }
@@ -143,21 +143,22 @@
       try { const w = window.open(u, "_blank", "noopener"); if (!w) throw new Error("blocked"); }
       catch { window.UI.copyText(u); toast("Link copied to the clipboard.", "info"); }
     };
+    const sys = S.meta?.system || {};
     const body = el("div", {},
       el("div", { class: "about-hero" },
-        el("div", { class: "ah-ico", html: ICONS.svg("search") }),
+        el("div", { class: "ah-ico", html: ICONS.svg("film") }),
         el("div", {},
-          el("h2", {}, "WebFinder", el("i", {}, "v1.0")),
-          el("p", {}, "Dork-aware meta search for REAL files — images, videos, torrents, e-books, archives and software — with a built-in parallel download manager."))),
+          el("h2", {}, "All Video Downloader", el("i", {}, `v${S.meta?.version || "2.0"}`)),
+          el("p", {}, "One job, done properly: every link that contains a video — any site, any container, any stream — becomes a file on your disk at the quality YOU picked."))),
       el("div", { class: "about-feats" },
-        feat("zap", "True media verticals", "One chip queries YouTube, Bing Images, apibay, Nyaa, Gutenberg, Open Library… — never padded with web-page filler."),
-        feat("search", "Google-dork aware", "filetype:, intitle:index of, site: and friends run across five engines, merged and deduped."),
-        feat("download", "IDM-ready links", "Every card exposes the direct file URL for one-click copy; the manager adds Range resume, pause, retry and speed stats."),
-        feat("shield", "Honest failures", "A blocked index shows its actual error instead of lying with irrelevant results — with the fixes that work."),
-        feat("cpu", "Native desktop shell", "pywebview window: drag, maximize/restore, native folder picker, auto-installed FFmpeg. Or run browser.bat."),
-        feat("sparkle", "Smart download plans", "HLS/DASH remux through FFmpeg; platform videos honor the exact quality you picked via yt-dlp.")),
+        feat("zap", "Universal link engine", "yt-dlp's ~1,900 extractors, raw .mp4/.mkv files, HLS/DASH manifests, and pages that hide their video — deep-scanned and re-analyzed until a real stream is found."),
+        feat("film", "Real quality choice", "Resolution chips carry exact yt-dlp format IDs (`137+140/…`); for raw manifests the variant ladder is parsed locally so you pick the rung — never a lottery."),
+        feat("shield", "YouTube, without the drama", "Multi-client extraction (android/tv → ios → web), your browser session cookies on demand, and a daily automatic yt-dlp refresh — the anti-bot treadmill runs under the hood."),
+        feat("download", "Resumable by design", "HTTP Range resume, pause/retry, concurrent fragment HLS capture via FFmpeg with `-c copy` (no re-encode, no quality loss)."),
+        feat("cpu", "Native desktop shell", "pywebview window: frameless, HW-accelerated, native folder picker, auto-installed FFmpeg. Or run browser.bat.")),
       el("div", { class: "about-chips" },
-        chip("pywebview"), chip("FastAPI"), chip("yt-dlp"), chip("curl-cffi"), chip("FFmpeg"), chip("httpx"), chip("WebView2")),
+        chip(`yt-dlp ${sys.yt_dlp || "—"}`), chip(sys.ffmpeg?.available ? "FFmpeg ✓" : "FFmpeg auto-install"),
+        chip("httpx Range-resume"), chip("FastAPI"), chip("pywebview"), chip("WebView2")),
       el("div", { class: "about-author" },
         el("div", { class: "aa-ava" }, "BE"),
         el("div", { style: { flex: "1" } },
@@ -165,7 +166,7 @@
           el("p", {}, "Design · code · relentless edge-case hunting")),
         el("button", { class: "btn btn-ghost btn-sm", onclick: () => openExt("mailto:inbox.ehsani@gmail.com") }, "Email"),
         el("button", { class: "btn btn-ghost btn-sm", onclick: () => openExt("https://github.com/wrappedman") }, "GitHub")));
-    window.UI.modal({ title: "About WebFinder", body, actions: [{ label: "Close", primary: true }] });
+    window.UI.modal({ title: "About All Video Downloader", body, actions: [{ label: "Close", primary: true }] });
   }
 
   function slideIndicator(target) {

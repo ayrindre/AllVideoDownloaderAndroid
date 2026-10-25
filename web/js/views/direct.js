@@ -1,4 +1,4 @@
-/* WebFinder · views/direct.js — Smart Direct Link module: analyze anything, act accordingly */
+/* All Video Downloader · views/direct.js — paste any video link, pick a quality, get the file */
 (function () {
   const { $, el, toast, fmtBytes, fmtDuration } = window.UI;
   const S = window.Store;
@@ -7,7 +7,7 @@
     { label: "YouTube", url: "https://www.youtube.com/watch?v=dQw4w9WgXcQ" },
     { label: "HLS stream", url: "https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8" },
     { label: "Direct MP4", url: "https://filesamples.com/samples/video/movie_1080p.mp4" },
-    { label: "Linux ISO", url: "https://cdimage.ubuntu.com/lubuntu/releases/24.04/release/lubuntu-24.04.2-desktop-amd64.iso" },
+    { label: "DASH stream", url: "https://dash.akamaized.net/akamai/bbb_30fps/bbb_30fps.mpd" },
   ];
 
   let current = null;   // last analysis payload
@@ -34,9 +34,9 @@
       el("div", { class: "radar" }, el("div", { class: "ring" }), el("div", { class: "ring" }), el("div", { class: "ring" }),
         el("div", { class: "sweep" }), el("div", { class: "core", html: ICONS.svg("link") })),
       el("p", { style: { marginTop: "22px", fontSize: "13.5px", lineHeight: 1.6 } },
-        "Waiting for a URL. Media-platform links get the ", el("b", {}, "yt-dlp"), " treatment, ",
-        el("code", {}, ".m3u8"), "/", el("code", {}, ".mpd"), " streams get captured with ", el("b", {}, "FFmpeg"),
-        ", and files stream straight into the Download Manager.")));
+        "Every quality the link exposes becomes a button: platform videos resolve through ", el("b", {}, "yt-dlp"),
+        " with real format IDs, ", el("code", {}, ".m3u8"), "/", el("code", {}, ".mpd"),
+        " manifests get their variant ladder parsed, raw files stream straight into the manager, and pages are deep-scanned for the video hiding inside them.")));
   }
 
   async function analyze() {
@@ -59,7 +59,7 @@
       renderError(err.message);
     } finally {
       btn.disabled = false;
-      btn.querySelector("span:last-child").textContent = "Analyze";
+      btn.querySelector("span:last-child").textContent = "Grab it";
     }
   }
 
@@ -165,21 +165,54 @@
     if (d.duration) kv.append(el("div", { class: "kv" }, el("span", { class: "k" }, "Duration"), el("span", { class: "v" }, fmtDuration(d.duration))));
     if (d.bit_rate) kv.append(el("div", { class: "kv" }, el("span", { class: "k" }, "Bitrate"), el("span", { class: "v" }, `${(d.bit_rate / 1000).toFixed(0)} kbps`)));
     if (d.streams?.length) kv.append(el("div", { class: "kv" }, el("span", { class: "k" }, "Tracks"),
-      el("span", { class: "v" }, d.streams.map((s) => `${s.type}:${s.codec}${s.height ? ` ${s.height}p` : ""}`).join(" · "))));
+      el("span", { class: "v" }, d.streams.map((x) => `${x.type}:${x.codec}${x.height ? ` ${x.height}p` : ""}`).join(" · "))));
     body.append(kv);
-    if (!d.ffmpeg) {
-      body.append(el("div", { class: "notice warn", style: { marginTop: 14 },
-        html: `${ICONS.svg("warning")}<div><b>FFmpeg required.</b> Install it (<code>winget install Gyan.FFmpeg</code>) and point WebFinder at it in Settings → FFmpeg path. Capture will be simulated in this demo environment otherwise.</div>` }));
-    } else {
-      body.append(el("div", { class: "notice info", style: { marginTop: 14 },
-        html: `${ICONS.svg("info")}<div>The stream will be captured losslessly with <code>-c copy</code> into a <b>.${window.Store.settings.default_container || "mp4"}</b> container — no re-encode, CPU stays cool.</div>` }));
+
+    const laddered = (d.formats || []).length > 1;
+    const sel = { fmt: (d.formats || [])[0] || { label: "stream" } };
+    if (laddered) {
+      body.append(el("div", { class: "ac-block-label", style: { marginTop: 14 } }, "Quality — variants found in the manifest"));
+      const qrow = el("div", { class: "chip-set", style: { justifyContent: "flex-start" } });
+      let dlBtn = null;
+      for (const f of d.formats) {
+        const active = f === sel.fmt;
+        const chip = el("button", { class: `chip${active ? " on" : ""}`, type: "button",
+          style: { "--chip-c": f.height >= 2160 ? "#f472b6" : f.height ? "#a855f7" : "#38bdf8", height: "34px", padding: "0 13px" } },
+          el("span", { html: ICONS.svg("film") }), f.label || "variant");
+        chip.addEventListener("click", () => {
+          sel.fmt = f;
+          [...qrow.children].forEach((c) => c.classList.remove("on"));
+          chip.classList.add("on");
+          if (dlBtn) dlBtn.querySelector("span:last-child").textContent = `Download ${f.label || "chosen variant"}`;
+        });
+        qrow.append(chip);
+      }
+      body.append(qrow);
     }
-    body.append(el("div", { class: "ac-actions" },
-      el("button", { class: "btn btn-primary", onclick: (e) => enqueue(e, d, { label: "stream" }) },
-        el("span", { class: "btn-ico", html: ICONS.svg("film") }), el("span", {}, "Capture & convert")),
-      el("button", { class: "btn btn-ghost", onclick: () => { window.UI.copyText(d.url); toast("m3u8 link copied — works with VLC, IDM & yt-dlp too.", "ok", { icon: "copy" }); } },
+    if (!d.ffmpeg && !laddered) {
+      body.append(el("div", { class: "notice warn", style: { marginTop: 14 },
+        html: `${ICONS.svg("warning")}<div><b>FFmpeg required.</b> The app installs it automatically on next launch if it is missing — stream capture runs through it.</div>` }));
+    }
+    body.append(el("div", { class: "ac-actions", style: { marginTop: 14 } },
+      el("button", { class: "btn btn-primary", onclick: (e) => enqueueStream(e, d, sel) },
+        el("span", { class: "btn-ico", html: ICONS.svg("film") }),
+        el("span", {}, laddered ? `Download ${sel.fmt?.label || "chosen variant"}` : "Capture & convert")),
+      el("button", { class: "btn btn-ghost", onclick: () => { window.UI.copyText(d.url); toast("Stream URL copied — works with VLC, IDM & yt-dlp too.", "ok", { icon: "copy" }); } },
         el("span", { class: "btn-ico", html: ICONS.svg("copy") }), el("span", {}, "Copy stream URL"))));
     card.append(body);
+  }
+
+  /* the server picks the path: yt-dlp when a specific variant must be muxed
+     with its audio track, FFmpeg on the picked variant playlist otherwise */
+  async function enqueueStream(e, d, sel) {
+    const btn = e.currentTarget;
+    const original = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>`;
+    try {
+      await window.API.startDownload({ url: d.url, title: d.title || "", meta: { fmt: sel.fmt } });
+      toast("Transfer started — watch it in the Download Manager.", "ok", { icon: "dl", actionLabel: "View", onAction: () => S.emit("nav", "view-downloads") });
+    } catch (err) { toast(err.message, "err"); }
+    finally { btn.disabled = false; btn.innerHTML = original; }
   }
 
   function renderDirect(d) {
@@ -210,7 +243,7 @@
       card.append(el("div", { class: "notice info", style: { marginBottom: 8 }, html: `${ICONS.svg("info")}<div>${hint}</div>` }));
     }
     card.append(el("div", { class: "ac-actions" },
-      el("button", { class: "btn btn-primary", onclick: () => { S.emit("nav", "view-settings"); toast("Settings → Media & conversion → Browser cookies source.", "info"); } },
+      el("button", { class: "btn btn-primary", onclick: () => { S.emit("nav", "view-settings"); toast("Settings → Video & capture → Browser cookies source.", "info"); } },
         el("span", { class: "btn-ico", html: ICONS.svg("settings") }), el("span", {}, "Open Settings (cookies)")),
       el("button", { class: "btn btn-ghost", onclick: analyze },
         el("span", { class: "btn-ico", html: ICONS.svg("refresh") }), el("span", {}, "Retry")),
@@ -234,7 +267,7 @@
     const card = cardShell("PAGE · no direct file", "#8b8b96");
     card.append(el("h2", { class: "ac-title", style: { marginBottom: 8 } }, d.url));
     card.append(el("p", { style: { fontSize: 13, color: "var(--text-2)", lineHeight: 1.7 } },
-      "That URL is a regular web page. " + (d.candidates?.length
+      "That URL plays its video through a script — no plain file link, but the deep scan dug. " + (d.candidates?.length
         ? `The deep-link scanner found <b>${d.candidates.length}</b> downloadable file${d.candidates.length === 1 ? "" : "s"} inside it:`
         : "No direct file links were found inside it — the real file is probably loaded by JavaScript.")));
     if (d.candidates?.length) {
@@ -255,7 +288,7 @@
     const card = cardShell("UNREACHABLE", "#fb7185");
     card.append(el("div", { class: "notice err", style: { marginBottom: 12 }, html: `${ICONS.svg("warning")}<div>${escapeHtml(msg)}</div>` }));
     card.append(el("p", { style: { fontSize: 12.5, color: "var(--text-3)", lineHeight: 1.6 } },
-      "Tips: some hosts block datacenter IPs, TLS handshakes fail behind corporate proxies, and offline sandboxes can’t reach the internet at all. In this preview environment Demo mode (Settings) simulates the full pipeline instead."));
+      "Tips: some hosts block foreign/datacenter IPs (a proxy in Settings → Downloads routes everything), TLS handshakes die behind corporate gateways, and a link that redirects to a JS-only player may expose no file at all — copy the real URL from the browser\u2019s DevTools Network tab and paste it here."));
   }
 
   /* ── actions ─────────────────────────────────────────────────────────────── */

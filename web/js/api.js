@@ -1,4 +1,4 @@
-/* WebFinder · api.js — REST + WebSocket bridge with graceful desktop/browser handling */
+/* All Video Downloader · api.js — REST + WebSocket bridge with graceful desktop/browser handling */
 (function () {
   const BASE = "";
 
@@ -21,7 +21,6 @@
     meta: () => req("GET", "/api/meta"),
     getSettings: () => req("GET", "/api/settings"),
     saveSettings: (patch) => req("PUT", "/api/settings", { patch }),
-    search: (query, types, engines, filters) => req("POST", "/api/search", { query, types, engines, filters }),
     analyze: (url) => req("POST", "/api/analyze", { url }),
     analyzeDownload: (url, title, format) => req("POST", "/api/analyze/download", { url, title, format }),
     startDownload: (payload) => req("POST", "/api/downloads", payload),
@@ -30,6 +29,7 @@
     removeJob: (id) => req("DELETE", `/api/downloads/${id}`),
     clearFinished: () => req("POST", "/api/downloads/clear"),
     openPath: (p) => req("POST", `/api/system/open-path${p ? `?path=${encodeURIComponent(p)}` : ""}`),
+    exit: () => req("POST", "/api/system/exit"),
   };
 
   /* ── desktop bridge: window controls & native dialogs via pywebview ──── */

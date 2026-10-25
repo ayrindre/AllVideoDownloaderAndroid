@@ -280,3 +280,15 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 /* long block-reason URLs must never blow out the blocked-index panel */
 .results-empty .notice, .results-empty p, .rh-engines .eng-chip { overflow-wrap: anywhere; word-break: break-word; max-width: 100%; }
 .results-empty { min-width: 0; }
+
+/* ── exit affordance (sidebar) + farewell overlay ─────────────────────────── */
+.collapse-btn.exit-btn:hover { color: #fb7185; border-color: rgba(251,113,133,.35); background: rgba(251,113,133,.08); }
+#exit-overlay { position: fixed; inset: 0; z-index: 999; background: rgba(6,6,10,.88);
+  backdrop-filter: blur(14px); display: grid; place-items: center; animation: exitFade .25s ease; }
+.exit-card { text-align: center; display: flex; flex-direction: column; gap: 8px; align-items: center; padding: 34px 44px; }
+.exit-card .exit-ico { width: 54px; height: 54px; border-radius: 16px; display: grid; place-items: center;
+  background: linear-gradient(130deg, var(--ac-1,#a855f7), var(--ac-2,#4f7cff)); box-shadow: 0 12px 40px rgba(120,80,255,.35); }
+.exit-card .exit-ico svg { width: 26px; height: 26px; color: #fff; }
+.exit-card b { font-size: 15.5px; }
+.exit-card p { color: var(--text-3); font-size: 12.5px; max-width: 340px; line-height: 1.6; overflow-wrap: anywhere; }
+@keyframes exitFade { from { opacity: 0 } to { opacity: 1 } }

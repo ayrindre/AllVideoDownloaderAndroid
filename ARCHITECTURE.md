@@ -1,188 +1,67 @@
-# WebFinder — Architecture Reference
+# All Video Downloader — architecture notes
 
-Deep-dive companion to [README.md](README.md). Everything here matches the code in this repo.
-
----
-
-## 1. Process model
+One promise: **any link containing a video → downloadable file, chosen quality.**
 
 ```
-┌────────────────────────────────────────────────────────────────────────┐
-│  WebFinder process (run.py)                                            │
-│                                                                        │
-│   main thread                     worker thread                        │
-│   ───────────                     ─────────────                        │
-│   pywebview Window (WebView2)     uvicorn Server                       │
-│    · frameless=True                · FastAPI app                       │
-│    · js_api=DesktopBridge          · all I/O is asyncio                │
-│    · loads http://127.0.0.1:8765   · blocking work → to_thread          │
-│                                                                        │
-│   Browser/dev fallback: same URL opened in the default browser         │
-└────────────────────────────────────────────────────────────────────────┘
+run.py ──▶ webfinder.app:create_app() ──▶ FastAPI ─┬─ /api/*        (webfinder/api)
+   │  (deps check, FFmpeg bootstrap,               ├─ /ws           (WsHub ⇄ DownloadManager)
+   │   daily yt-dlp pip refresh)                   └─ /static, /    (web/ frontend)
 ```
 
-* **One port, one origin.** Static frontend, REST and WS share `127.0.0.1:8765` — no CORS pain, no file:// quirks, and the webview is just a *renderer*.
-* **No magic bridge.** JS never calls Python functions directly (that's Eel's model). It talks HTTP/JSON + WebSocket. That keeps the frontend portable (browser preview, and — if you ever want it — Tauri or Electron swap-in) while pywebview handles the *window*, not the data.
-* **pywebview-specific glue** lives only in `webfinder/desktop/window.py`:
-  `DesktopBridge.minimize/toggle_maximize/close/pick_folder` are exposed as `window.pywebview.api.*`, and
-  `frameless=True` + CSS `-webkit-app-region: drag` on the HTML titlebar gives the custom window frame.
+## Link engine — `core/media.py :: analyze(url)`
 
-## 2. Backend layout
+Resolution order, each stage proven and never guessed:
 
-```
-webfinder/
-├── app.py                 # FastAPI factory, static mount, WsHub (event fan-out), manager wiring
-├── config.py              # DEFAULTS + ~/.webfinder/settings.json (atomic save, deep-merge patch)
-├── api/__init__.py        # all routes + pydantic schemas (below)
-├── engines/__init__.py    # scraper per engine + parallel aggregator w/ per-engine error capture
-├── core/
-│   ├── dorks.py           # FILE_TYPES catalogue → dork strings, ext classifier, size/URL heuristics
-│   ├── downloader.py      # DownloadManager: DownloadJob state machine, 4 worker kinds, events
-│   ├── media.py           # analyze(): media|hls|direct|magnet|page + plan_download() + page scanner
-│   └── ffmpeg_tools.py    # find_ffmpeg/probe/capture_stream (progress via -progress pipe:1)
-└── desktop/window.py      # pywebview host + JS api + server-readiness wait loop
-```
+1. **magnet** → identified, copy-only (explained in UI).
+2. **`.m3u8`/`.mpd`** → `parse_m3u8_master` / `parse_mpd_master` build the variant
+   ladder (height · bandwidth · rep-id) + ffprobe info → UI quality chips.
+3. **yt-dlp registry** — any site with an extractor. `_ytdlp_extract` runs up to
+   **three client passes** (android+tv, ios+mweb, web), stops at the first map with
+   anything above 480p, merges the rest by format-id union. The picker builder
+   rounds heights to the canonical ladder and emits `"137+140/bestvideo[height<=1080]/…"`
+   — **real ids first**, so the downloaded file matches the clicked chip.
+4. **Extractor found but blocked** → `kind:"media_error"` carrying the raw yt-dlp
+   message + fix hints (cookies source / restart after the daily refresh).
+5. **Silent URL** → HEAD/ranged-GET probe: content-type, then **magic bytes**
+   (`ftyp`, EBML, `FLV`, RIFF/AVI, MPEG-PS) via `sniff_container`. Lying
+   `octet-stream` servers can't hide an MP4.
+6. **Page** → `scan_page` (og:video, `<video>/<source>`, file anchors, index-of
+   listings with sizes); best video candidate is **re-analyzed** (`_depth < 2`) so
+   embedded players collapse into a real download card.
 
-## 3. REST / WS API
+`plan_download` converts an analyze payload into enqueue kwargs:
+media→`ytdlp` (with chosen format), stream→`ytdlp` (variant selector; ffmpeg fallback
+via `meta.variant_url` when yt-dlp is absent), file→`http`.
 
-| Method + path | Purpose |
+## Workers — `core/downloader.py`
+
+| kind | path |
 |---|---|
-| `GET /api/meta` | app info, engine & file-type catalogues, FFmpeg/yt-dlp availability, desktop flag |
-| `GET/PUT /api/settings` | read / deep-merge settings (validated against known keys) |
-| `POST /api/search` | `{query, types[], engines[]}` → `{query(dorked), results[], engines[], elapsed_ms}` |
-| `POST /api/analyze` | `{url}` → `kind: media|hls|direct|magnet|page` payload |
-| `POST /api/analyze/download` | enqueue with format choice `{url,title,format}` |
-| `POST /api/scan` | crawl page for hidden direct links |
-| `POST /api/downloads` | enqueue `{url, filename?, title?, kind?}` (kind empty = auto-plan) |
-| `GET /api/downloads` | job list (bootstrap after (re)connect) |
-| `POST /api/downloads/{id}/pause·resume·cancel·retry` | job control (cooperative events, not thread-killing) |
-| `DELETE /api/downloads/{id}` · `POST /api/downloads/clear` | list management |
-| `POST /api/system/open-path?path=` | reveal file/folder in Explorer / Finder / xdg; a missing path walks up to the nearest existing directory — works in browser mode too (the server is the user's machine) |
-| `GET /ws` | server→client events: `bootstrap`, `jobs.list`, `job.update` (≈4/s per active job) |
-| `GET /api/docs` | interactive OpenAPI docs |
+| `http` | httpx stream, 256 KB chunks, `Range` resume, size reconciliation, ~4 events/s |
+| `ytdlp` | thread: fixed `outtmpl` stem, hook→progress, pause via `_pause` event, `android/tv→web` options attempts, cookies + proxy from settings |
+| `hls` | `ffmpeg_tools.capture_stream`: `meta.variant_url` if the user picked a rung, `-c copy` + `aac_adtstoasc` + `+faststart`, progress from `-progress pipe`, proxy env forwarded |
 
-WS client auto-falls back to `GET /api/downloads` polling (1.4 s) whenever the socket is down — so proxies/dev servers that drop upgrades still animate live.
+**Cancel = remove**: `cancel()` marks `_drop`, the worker self-removes on unwind;
+`publish()` is muted for `_removed` jobs so a dying worker can never revive its row.
 
-## 4. Download state machine
+## Settings — `config.py`
 
-```
-            ┌────────── retry ◄──────────┐
-            ▼                            │
- queued ─► downloading ─► done           │   (terminal: done · cancelled)
-             ▲   │  ▲      error ◄───────┤
-             │   ▼  │ pause↴             │
-             └── paused ── cancel ─► cancelled
-```
+`~/.avd/settings.json`; one-shot migration from `~/.webfinder`; retired search keys
+(`engines`, `result_limit`, `safe_search`, `resolve_pages`, `demo_mode`) are stripped
+on load — a stale file can't resurrect the removed module. `PUT /api/settings` accepts
+only keys present in the snapshot.
 
-* A global `asyncio.Semaphore(max_concurrent)` queues `queued` jobs; each worker is an `asyncio.Task`.
-* **pause/resume are cooperative**: workers poll `job._pause` between chunks/hooks. HTTP resumes use a saved byte offset + `Range: bytes=…` (416 ⇒ “already complete”); yt-dlp pauses in its progress hook; FFmpeg parks at its stdout read-loop and the child is `terminate()`d on cancel.
-* `job.update` events are throttled to ~4/s and carry everything the UI needs (pct, speed EMA, eta, unit bytes|time, quality label, `meta.simulated` flag).
-* Error strings are surfaced verbatim on the row + retry button — no silent failure states.
+## Frontend — `web/`
 
-### Worker kinds (`core/downloader.py`)
-| kind | Pipeline |
-|---|---|
-| `http` | httpx streaming, 256 KB chunks, Content-Range/Length totals, Range resume |
-| `hls` | ffprobe duration → `ffmpeg -progress pipe:1 -i URL [-headers…] -c copy [-bsf:a aac_adtstoasc -movflags +faststart] out.mp4` (`libx264` when re-encode requested / container demands it); progress = decoded `out_time_us` clock |
-| `ytdlp` | `yt_dlp.YoutubeDL({...}).download()` in a thread; `progress_hooks`, first **android/tv** player client (web client is 480-capped for bots), fixed-basename `outtmpl`, then `_settle_ytdlp_file()` re-points the job at the REAL merged file (glob `<stem>.*`, >1 KB, corrects extension) and reconciles size with `st_size` push into the same `job.update` stream; format strings like `bestvideo[height<=1080]+bestaudio/best[height<=1080]`; `DownloadCancelled` for cancel |
-| `sim` | deterministic-ish fake transfer (seeded RNG wobble), writes a real placeholder file, drives the identical UI path |
+Three views: **Grab a video** (analyze → quality chips → one button), **Downloads**
+(rows hydrate from `jobs.list`, so removals are server-authoritative), **Settings**
+(Downloads incl. proxy · Video & capture (container/quality/cookies/FFmpeg) ·
+Appearance · System). Sidebar: About + **Exit** (POST `/api/system/exit` → backend
+`os._exit`; desktop window dies with it). State lives in `Store` (Map of jobs + tiny
+event bus); api.js WS with polling fallback.
 
-### Vertical search (`core/verticals.py`)
-Five dedicated verticals — images, videos, torrents, e-books, archives — each a parallel
-fan-out over real file indexes with per-source error capture (`{results, sources}`):
-torrents ride `apibay.org`'s JSON (info_hash → magnet augmented with live trackers, seeders,
-size) + Nyaa RSS + a lenient 1337x row scrape (stable `/torrent/{id}.torrent` links);
-e-books ride `gutendex.com` and Internet Archive's `advancedsearch`→`metadata` pair
-(prefers .pdf → .epub → .djvu download URLs); archives dork three engines and pass every
-row through `_archive_relevant()` — extension-in-url/title or "index of" — the hard gate
-that killed the "web results instead of files" problem. `core/tls.py` wraps optional
-`curl_cffi` (Chrome JA3) for ALL Google traffic; absent it, engines degrade to httpx +
-dual-UA attempts.
+## Desktop — `desktop/window.py`
 
-Peril history: `_ytdlp_extract` once returned a bare 14-key dict where callers unpack
-`media, yt_err = …` — every SUCCESSFUL YouTube parse died with
-"too many values to unpack (expected 2, got 14)". DOM handlers must capture
-`e.currentTarget` **before** awaiting: it is null once dispatch ends, which silently
-broke the Copy-link flash/toast path.
-
-
-`search_images` / `search_videos` fan out to the engines' own media indexes in parallel:
-DDG needs a two-step handshake (fetch `duckduckgo.com/?q=…&ia=images` → extract `vqd` token →
-call `i.js`/`v.js?o=json`), Bing Images embeds escaped-JSON per item (`m="{&quot;murl&quot;…}"`)
-plus server-side `qft` filter tokens, Google isch is regex-scraped after un-escaping `\u002F`.
-Results normalize to `{title,url,thumb,page,width,height,duration,engine,file_type,is_direct}`;
-local post-filters (size/aspect/duration/min-res) run after merge, then dedupe. Parsing is
-lenient-by-design: HTML entities and `\/` escapes are undone first, item fields are pulled
-from the *containing JSON object* (nearest-occurrence wins), so Bing can reshuffle its markup
-without poisoning neighbours' widths/titles. Bing Images tries the `/images/async` fragment
-endpoint, then the full page; Google isch triples tolerate `?w=…`/`%3F` suffixes.
-Zero vertical results ⇒ the API returns `mode + vertical_blocked:true + per-engine errors` and
-the UI renders an honest blocked panel — **never** a dorked web-search fallback, because
-irrelevant pages are worse than an explained empty state. The Settings `proxy` applies to the
-vertical client too.
-
-Each vertical fails **soft per source** (`_source_of`), the API surfaces `engines[]` +
-`vertical_blocked`, and dorked-web sources pass `_dork_files_fallback` extension gates.
-The software vertical (GitHub `search/repositories` → `releases/latest` assets, F-Droid
-`search.f-droid.org/?format=json`) returns installer files; `ffmpeg_setup.ensure_ffmpeg()`
-(one-shot, env-opt-out) fetches verified builds into repo-local `bin/`.
-
-### Desktop bridge contract (`desktop/window.py`)
-pywebview recursively scans **every public attribute** of the `js_api` object
-(`webview/util.py::get_functions`) to build `window.pywebview.api`. Storing the
-native window on a *public* attribute (e.g. `self.window`) sends that scan into the
-WinForms object graph; `Rectangle.Empty` returns a fresh instance per access so
-pywebview's id()-dedupe fails and the injection thread drowns in
-`window.native.AccessibilityObject.Bounds.Empty…` recursion — the window never
-finishes loading JS and looks frozen. Hence: **js_api classes expose plain methods
-only; object references must be `_private`.** Enforced by
-`tools/test_desktop_contract.py`, which re-runs pywebview's real scanner over
-`DesktopBridge` and asserts exactly `close/minimize/pick_folder/toggle_maximize`
-with zero scan errors.
-
-### Analysis routing (`core/media.py::analyze`)
-```
-magnet: → magnet           (copy / hand off — never “downloaded”)
-.m3u8/.mpd or mpegurl → hls (ffprobe metadata in card)
-else yt-dlp extract_info   → media (title, thumb, duration, per-height format table)
-     └ extract_info failed but the URL matches a registered extractor
-       (yt_dlp.extractor.gen_extractors) → media_error + fix hints   ← never a fake "page"
-else HEAD/GET probe        → direct  (size, content-type, ranges support)
-else HTML scan (regex over 12 media extensions) → page + candidate list
-```
-`scan_page()` is also run on the top ambiguous *search results* (`resolve_pages`) so cards can expose hidden direct links — this is what makes “Copy Download Link” meaningful for IDM users even when the SERP only shows a wrapper page.
-
-## 5. Frontend foundation (HTML/CSS/JS)
-
-```
-web/
-├── index.html        # semantic shell: .titlebar → .shell(sidebar, viewport) → 4 <section.view>
-│                     # + <template>s for result card / download row (cloned, never re-parsed)
-├── css/base.css      # design tokens, accents via html[data-accent], ambient orbs+grain, window chrome
-├── css/components.css# buttons, chips, glass cards, FABs, skeletons/spinner/radar, progress, toasts
-├── css/views.css     # hero layout, results head (sticky), direct workbench, dl rows, settings wall
-└── js/               # icons.js · api.js · ui.js · state.js · app.js · views/{search,direct,downloads,settings}.js
-```
-
-* **Tokens first** — surfaces, radii, easings (`--ease`, `--ease-spring`) and three motion tiers live in `:root`; every accent is a gradient pair so swapping `data-accent` re-skins glows, focus rings and progress fills with zero JS re-render.
-* **Layered glass recipe**: translucent gradient fill + `backdrop-filter: blur(22px) saturate(1.4)` + hairline `--panel-border` + inset highlight (`inset 0 1px 0 rgba(255,255,255,.05)`). Cards add a cursor-following `radial-gradient` (`--mx`) spotlight. All of it is compositor-only (opacity/transform/blur) so animations stay GPU-driven.
-* **Motion system**: enter keyframes (`view-in`, `card-in` staggered via `--i`, `toast-in` spring), sliding nav indicator (`transform: translateY(var(--nav-y))` on one pseudo-element), shimmer skeletons (`::after` translate loop), animated stripe + sheen on progress. `body.preload` disables transitions until first paint; `prefers-reduced-motion` kills everything.
-* **State**: one `Store` (settings, meta, results, jobs Map) + tiny pub/sub. Views subscribe to `job.update`/`jobs.hydrated`/`settings.changed`; nothing polls from the UI unless the WS is down.
-* **View routing**: `.view.active` is the single display switch — sections never stack. The
-  search hero has two states (`compact` = sticky command bar docked above results) driven by one
-  class; URL-shaped queries are redirected to the Direct module before hitting the engines.
-* **Templates over string HTML**: `<template id="tpl-result-card">` cloned + hydrated — fast, XSS-safe by default (`textContent` everywhere user data lands).
-
-## 6. Extending
-
-* **New engine** → one `async fn(client, query, limit) -> list[dict]` in `engines/__init__.py` + one line in `ENGINES`/`ENGINE_META`. Errors propagate to the per-engine status strip for free.
-* **New file type** → add to `core/dorks.FILE_TYPES` (dork + exts + color + icon name). Chips, classification and badge colors pick it up automatically.
-* **Direct Python calls, Eel-style** → register pywebview `js_api` methods in `DesktopBridge` and call `window.pywebview.api.x()` (browser fallbacks are the pattern everywhere).
-* **Torren**t deep-handling (tracker scrape, multi-source merge) → natural fit in `media.analyze`; keep the “copy link to IDM/your client” affordances intact.
-
-## 7. Security & politeness notes
-
-* Binds `127.0.0.1` in desktop mode (browser dev mode uses `0.0.0.0` only for this sandbox preview).
-* `open-path` accepts settings-adjacent paths only in spirit — it's a localhost app; if you expose the port, gate it.
-* Scrapers rotate realistic UA strings, never execute page JS, and cap snippet parsing with bounded regexes.
-* `verify=False` on search clients is deliberate (some mirrors ship broken chains) — swap per-engine if policy requires.
+pywebview `edgechromium`, frameless custom titlebar; the js bridge exposes **only
+private attributes** (enforced by `tools/test_desktop_contract.py` — pywebview's
+recursive `get_functions` scan otherwise drowns in WinForms internals).

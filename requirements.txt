@@ -1,9 +1,8 @@
-# WebFinder — core backend
+# All Video Downloader — core backend
 fastapi>=0.111
 uvicorn[standard]>=0.30
 httpx[socks]>=0.27
 pydantic>=2.7
-yarl>=1.9            # url parsing used by engines
 yt-dlp>=2024.10.7    # media platform extraction + downloads (YouTube & ~1800 sites)
 
 # --- Windows desktop shell (recommended) --------------------------------
@@ -17,4 +16,3 @@ pywebview>=5.1       # WebView2 (Chromium) window: frameless, HW-accelerated
 
 # --- External tools (not pip — install on the target machine) -------------
 # ffmpeg / ffprobe   -> winget install Gyan.FFmpeg   (required for .m3u8/.mpd capture)
-curl-cffi>=0.7

@@ -12,6 +12,7 @@
     minus: '<path d="M5 12h14"/>',
     square: '<rect x="5" y="5" width="14" height="14" rx="2"/>',
     restore: '<rect x="4" y="8" width="12" height="12" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-2"/>',
+    exit: '<path d="M9 4H6.5A2.5 2.5 0 0 0 4 6.5v11A2.5 2.5 0 0 0 6.5 20H9"/><path d="M15 8l4 4-4 4M19 12H9"/>',
     panelLeft: '<rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9.5 4v16"/>',
     video: '<rect x="2" y="6" width="13" height="12" rx="2.5"/><path d="m15 10 6-3.5v11L15 14z"/>',
     image: '<rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="9.5" r="1.6"/><path d="m4.5 18 5-5.5 3 3 3.5-4 4.5 5"/>',

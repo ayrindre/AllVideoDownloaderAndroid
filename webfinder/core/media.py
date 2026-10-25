@@ -1,18 +1,21 @@
-"""WebFinder — Smart Direct Link module.
+"""All Video Downloader — universal link engine.
 
-`analyze(url)` decides what a pasted URL actually is and returns the right
-workbench for it:
+`analyze(url)` is the heart of the app: ANY link that contains a video
+becomes a downloadable job with a quality ladder you can pick from:
 
-  media   → YouTube / Vimeo / TikTok & the ~1800 yt-dlp extractors:
-            metadata + selectable resolutions, downloaded through yt-dlp.
-  hls     → .m3u8 / .mpd manifests: captured & converted with FFmpeg.
-  direct  → a real file at the end of the URL (mp4, zip, torrent…):
-            streamed with Range-resume support.
-  magnet  → magnet link: copied to clipboard, handed to a torrent client.
-  page    → ordinary web page: scanned for direct media links inside it.
+  media   → YouTube & the ~1900 yt-dlp extractors: metadata + selectable
+            resolutions, downloaded through yt-dlp (multi-client, cookies).
+  hls     → .m3u8 / .mpd manifests: variant ladder parsed locally so you
+            can CHOOSE quality; captured via yt-dlp or FFmpeg -c copy.
+  direct  → a real file at the end of the URL — verified by content-type
+            AND container magic bytes (ftyp/EBML/FLV/AVI/…), streamed
+            with Range-resume support.
+  page    → ordinary web page: deep-scanned (og:video, <source>, raw
+            anchors, directory listings); when the scan finds a video,
+            the app re-analyzes THAT url instead of dead-ending.
+  magnet  → recognized and explained; copy it to your torrent client.
 
-Every path degrades gracefully; when the network is unavailable the whole
-module answers with synthetic "demo" payloads so the UI keeps working.
+Every path degrades gracefully with an honest error and a fix hint.
 """
 from __future__ import annotations
 
@@ -24,10 +27,10 @@ from urllib.parse import urlparse, urljoin, unquote
 import httpx
 
 from ..config import settings
-from . import dorks as dk
+from . import filekind as fk
 from .ffmpeg_tools import find_ffmpeg, probe
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36 WebFinder/1.0"
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36 AVD/2.0"
 
 
 def base_yt_opts(extra: dict | None = None) -> dict:
@@ -45,6 +48,9 @@ def base_yt_opts(extra: dict | None = None) -> dict:
     browser = (settings.get("ytdlp_browser_cookies") or "").strip()
     if browser:
         opts["cookiesfrombrowser"] = (browser,)
+    px = (settings.get("proxy") or "").strip()
+    if px:
+        opts["proxy"] = px
     if extra:
         opts.update(extra)
     return opts
@@ -73,32 +79,157 @@ MEDIA_HREF_RE = re.compile(
     re.I)
 
 
-async def analyze(url: str) -> dict:
+# container signatures — the truth behind lying Content-Types
+_MAGIC_TESTS = (
+    (lambda b: b[4:8] == b"ftyp", "mp4"),
+    (lambda b: b[:4] == b"\x1a\x45\xdf\xa3", "mkv"),
+    (lambda b: b[:3] == b"FLV", "flv"),
+    (lambda b: b[:4] == b"RIFF" and b[8:12] == b"AVI ", "avi"),
+    (lambda b: b[:4] == b"\x00\x00\x01\xba" or b[:4] == b"\x00\x00\x01\xb3", "mpeg"),
+    (lambda b: b[:4] == b"\x00\x00\x00", "mp4"),          # bare ISO-BMFF heuristics
+)
+
+
+def sniff_container(head: bytes) -> str:
+    for test, name in _MAGIC_TESTS:
+        try:
+            if test(head):
+                return name
+        except IndexError:
+            continue
+    return ""
+
+
+_M3U8_STREAM_RE = re.compile(
+    r"#EXT-X-STREAM-INF:([^\n]*)\n\s*([^#\n][^\n]*)", re.I)
+
+
+def parse_m3u8_master(text: str, base: str) -> list[dict]:
+    """Variant ladder from a master playlist: RESOLUTION/BANDWIDTH per entry."""
+    out: list[dict] = []
+    for i, (attrs, uri) in enumerate(_M3U8_STREAM_RE.findall(text)):
+        hm = re.search(r"RESOLUTION=(\d+)x(\d+)", attrs)
+        bw = re.search(r"BANDWIDTH=(\d+)", attrs)
+        height = int(hm.group(2)) if hm else 0
+        out.append({"idx": i, "url": urljoin(base, uri.strip()),
+                    "height": height,
+                    "width": int(hm.group(1)) if hm else 0,
+                    "bandwidth": int(bw.group(1)) if bw else 0})
+    out.sort(key=lambda v: -(v["height"] or 0) * 10**9 - v["bandwidth"])
+    return out
+
+
+def parse_mpd_master(text: str, base: str) -> list[dict]:
+    """Video representations from a DASH MPD (AdaptationSet → Representations)."""
+    import xml.etree.ElementTree as ET
+    out: list[dict] = []
+    try:
+        root = ET.fromstring(re.sub("""\\sxmlns(\\:[^=]+)?=["'][^"']*["']""", "", text, count=1))
+    except ET.ParseError:
+        return []
+
+    def walk(node, inherit_base: str):
+        for aset in node.findall("AdaptationSet"):
+            if (aset.get("contentType") or aset.get("mimeType") or "").lower().startswith("audio"):
+                continue
+            for rep in aset.findall("Representation"):
+                w = int(rep.get("width") or 0) or int(aset.get("width") or 0)
+                h = int(rep.get("height") or 0) or int(aset.get("height") or 0)
+                bw = int(rep.get("bandwidth") or 0)
+                rid = rep.get("id") or ""
+                ouri = ""
+                bu = rep.find("BaseURL")
+                if bu is not None and (bu.text or "").strip():
+                    ouri = urljoin(inherit_base, bu.text.strip())
+                if not ouri:
+                    continue
+                out.append({"idx": len(out), "url": ouri, "height": h, "width": w,
+                            "bandwidth": bw, "rep_id": rid})
+        for period in node.findall("Period"):
+            walk(period, inherit_base)
+
+    walk(root, base)
+    out.sort(key=lambda v: -(v["height"] or 0) * 10**9 - v["bandwidth"])
+    return out
+
+
+def stream_formats(ladder: list[dict]) -> list[dict]:
+    """UI-ready quality picker for a raw manifest (auto + one entry per rung)."""
+    forms = [{"height": 0, "label": "Best (auto)", "codecs": [], "fps": 0,
+              "format": "bv*+ba/b", "url": "", "size": None}]
+    for v in ladder:
+        h = v["height"]
+        sel = f"{v['idx']}/{v['idx'] + 1}"
+        if v.get("rep_id"):
+            sel = f"{v['rep_id']}/{sel}"
+        sel += "/best" + (f"[height<={h}]" if h else "")
+        label = (f"{h}p" if h else "") + (f" · {v['bandwidth'] // 1000} kbps" if v["bandwidth"] else "")
+        forms.append({"height": h, "label": label or "variant", "codecs": [], "fps": 0,
+                      "format": sel, "url": v["url"], "size": None})
+    return forms
+
+
+async def fetch_manifest(url: str) -> str:
+    px = (settings.get("proxy") or "").strip()
+    async with httpx.AsyncClient(follow_redirects=True, timeout=20.0,
+                                 headers={"User-Agent": UA},
+                                 **({"proxy": px} if px else {})) as client:
+        try:
+            r = await client.get(url, headers={"Range": "bytes=0-524287"})
+            r.raise_for_status()
+            return r.text
+        except httpx.HTTPError as exc:
+            raise RuntimeError(f"Manifest unreachable: {str(exc)[:160]}") from exc
+
+
+async def _stream_result(url: str) -> dict:
+    """HLS/DASH → ffprobe info when available + a locally parsed variant ladder."""
+    info: dict = {}
+    ladder: list[dict] = []
+    try:
+        text = await fetch_manifest(url)
+        if url.lower().endswith(".mpd") or "<mpd" in text[:600].lower():
+            ladder = parse_mpd_master(text, url)
+        elif "#EXTM3U" in text[:40] or "#EXT-X-STREAM-INF" in text[:6000]:
+            ladder = parse_m3u8_master(text, url)
+        elif text.lstrip().startswith("#EXTINF"):
+            ladder = []                       # media playlist — a single stream
+    except RuntimeError:
+        info = {}
+    if not info:
+        try:
+            info = await probe(url)
+        except Exception:  # noqa: BLE001 — ffprobe optional
+            info = {}
+    return {"kind": "hls", "url": url, "file_type": "video",
+            "title": fk.guess_filename(url, "stream"),
+            "ffmpeg": find_ffmpeg()["available"],
+            "duration": info.get("duration", 0), "streams": info.get("streams", []),
+            "bit_rate": info.get("bit_rate", 0),
+            "formats": stream_formats(ladder),
+            "single_stream": not ladder}
+
+
+async def analyze(url: str, _depth: int = 0) -> dict:
     url = url.strip()
     if not re.match(r"^[a-z]+://", url, re.I) and not url.startswith("magnet:"):
         url = "https://" + url
-
-    if settings.get("demo_mode"):
-        return _demo_payload(url)
 
     if url.lower().startswith("magnet:"):
         return {"kind": "magnet", "url": url,
                 "title": _magnet_title(url), "file_type": "magnet"}
 
-    ext = dk.url_extension(url)
-    if ext in dk.STREAM_EXTS:
-        info = await probe(url)
-        return {"kind": "hls", "url": url, "file_type": "video",
-                "title": dk.guess_filename(url, "stream"),
-                "ffmpeg": find_ffmpeg()["available"],
-                "duration": info.get("duration", 0),
-                "streams": info.get("streams", []),
-                "bit_rate": info.get("bit_rate", 0)}
+    ext = fk.url_extension(url)
+    if ext in fk.STREAM_EXTS:
+        return await _stream_result(url)
 
     # 1) Try the yt-dlp extractor registry — this covers YouTube & friends.
     media, yt_err = await _try_ytdlp(url)
-    if media:
+    if media and media.get("formats"):
         return media
+    # A media dict with an EMPTY format list is the Generic extractor staring at
+    # an HTML shell — never a verdict. Keep walking to the probe + deep-scan path
+    # (which is what actually finds the video such pages embed).
     # 1b) A registered extractor exists but extraction failed (bot check, age
     #     gate, geo block, outdated yt-dlp). Say exactly that — never bury it
     #     in a misleading "regular web page" verdict.
@@ -106,16 +237,18 @@ async def analyze(url: str) -> dict:
     if ie:
         hints = []
         if not settings.get("ytdlp_browser_cookies"):
-            hints.append("Set Settings → Media → <b>Browser cookies source</b> to <code>chrome</code>/<code>edge</code> so yt-dlp can use your logged-in session.")
-        hints.append("Update yt-dlp regularly: <code>pip install -U yt-dlp</code> — sites change extractors weekly.")
+            hints.append("Set Settings → Video & capture → <b>Browser cookies source</b> to <code>chrome</code>/<code>edge</code> so yt-dlp can use your logged-in session.")
+        hints.append("The app auto-refreshes yt-dlp daily — if it just updated, restart All Video Downloader once.")
         return {"kind": "media_error", "url": url, "extractor": ie, "file_type": "video",
-                "title": dk.guess_filename(url, ie),
+                "title": fk.guess_filename(url, ie),
                 "error": (yt_err or "yt-dlp returned no info")[:400],
                 "hints": hints}
 
-    # 2) Probe the URL itself (HEAD → fallback GET) and look at what comes back.
+    # 2) Probe the URL itself (HEAD → ranged GET) — content-type AND magic bytes.
+    px = (settings.get("proxy") or "").strip()
     async with httpx.AsyncClient(follow_redirects=True, timeout=15.0,
-                                 headers={"User-Agent": UA}) as client:
+                                 headers={"User-Agent": UA},
+                                 **({"proxy": px} if px else {})) as client:
         try:
             resp = await client.head(url)
             if resp.status_code >= 400 or not (resp.headers.get("content-type") or resp.headers.get("content-length")):
@@ -133,24 +266,58 @@ async def analyze(url: str) -> dict:
             size = int(cl)
         final = str(resp.url)
 
-    if "mpegurl" in ctype or "m3u8" in final or "dash" in ctype or ".mpd" in final:
-        info = await probe(final)
-        return {"kind": "hls", "url": final, "file_type": "video",
-                "title": dk.guess_filename(final, "stream"),
-                "ffmpeg": find_ffmpeg()["available"],
-                "duration": info.get("duration", 0),
-                "streams": info.get("streams", []), "bit_rate": info.get("bit_rate", 0)}
+        # 2a) manifest served under a generic URL?
+        if "mpegurl" in ctype or ".m3u8" in final or "dash" in ctype or ".mpd" in final:
+            return await _stream_result(final)
 
-    looks_like_file = bool(ext) or (size and (size > 1_000_000 or "octet-stream" in ctype))
+        # 2b) lying/absent content-type with no extension → sniff the container.
+        head_bytes = b""
+        if ext not in fk.EXT_KIND and ("octet-stream" in ctype or not ctype or "html" in ctype):
+            try:
+                hr = await client.get(final, headers={"Range": "bytes=0-63"})
+                head_bytes = hr.content[:64]
+            except httpx.HTTPError:
+                head_bytes = b""
+        sniffed = sniff_container(head_bytes) if len(head_bytes) >= 12 else ""
+        if sniffed and "html" not in ctype:
+            name = fk.guess_filename(final, f"video.{sniffed}")
+            if "." not in name:
+                name += f".{sniffed}"
+            return {"kind": "direct", "url": final, "title": unquote(name),
+                    "filename": unquote(name), "file_type": "video",
+                    "content_type": f"video/{sniffed} (magic-sniffed)",
+                    "size": size,
+                    "accepts_ranges": "206" in (resp.headers.get("accept-ranges", "") + resp.status_code.__str__())}
+
+    # HTML is never "a file at the end of the URL", whatever the extension says —
+    # .php/page.html pages must fall through to the deep-scan, not fake a download.
+    looks_like_file = "html" not in ctype and (
+        bool(ext) or (size and (size > 1_000_000 or "octet-stream" in ctype)))
     if looks_like_file:
         return {"kind": "direct", "url": final,
-                "title": unquote(dk.guess_filename(final, "file")),
-                "filename": unquote(dk.guess_filename(final, "file")),
-                "file_type": dk.classify(final), "content_type": ctype,
-                "size": size, "accepts_ranges": "206" in (resp.headers.get("accept-ranges", "") + resp.status_code.__str__())}
+                "title": unquote(fk.guess_filename(final, "file")),
+                "filename": unquote(fk.guess_filename(final, "file")),
+                "file_type": fk.classify(final), "content_type": ctype,
+                "size": size,
+                "accepts_ranges": "206" in (resp.headers.get("accept-ranges", "") + resp.status_code.__str__())}
 
-    # 3) Ordinary page — scan it for direct media links to offer as candidates.
-    candidates = await scan_page(final) if settings.get("resolve_pages") else []
+    # 3) Ordinary page — deep-scan for the video it actually hosts. A found
+    #    video/manifest URL is RE-ANALYZED (one level deep) instead of
+    #    dead-ending in a candidate list.
+    candidates = await scan_page(final)
+    vids = [c for c in candidates
+            if fk.classify(c["url"]) == "video"
+            or fk.url_extension(c["url"]) in fk.VIDEO_EXTS | fk.STREAM_EXTS]
+    if vids and _depth < 2:
+        vids.sort(key=lambda c: (-int(c.get("size_bytes") or 0),
+                                 0 if fk.url_extension(c["url"]) in fk.STREAM_EXTS else 1))
+        try:
+            sub = await analyze(vids[0]["url"], _depth + 1)
+            if sub.get("kind") not in ("page", "magnet"):
+                sub["found_on_page"] = final
+                return sub
+        except Exception:  # noqa: BLE001 — fall through to the plain page card
+            pass
     return {"kind": "page", "url": final, "title": "", "size": size,
             "content_type": ctype, "candidates": candidates}
 
@@ -181,24 +348,31 @@ def _ytdlp_extract(url: str) -> tuple[dict | None, str]:
     # quality picker lie ("selected 1080, downloaded 480"). We take whichever
     # attempt yields the RICHER map, and merge format lists when both answer.
     infos: list[dict] = []
-    for extra in ({"extractor_args": {"youtube": {"player_client": ["android", "tv"]}}}, {}):
+    for extra in ({"extractor_args": {"youtube": {"player_client": ["android", "tv"]}}},
+                  {"extractor_args": {"youtube": {"player_client": ["ios", "mweb"]}}},
+                  {}):
         try:
             with yt_dlp.YoutubeDL(base_yt_opts({**base, **extra})) as ydl:
                 infos.append(ydl.extract_info(url, download=False))
         except Exception as exc:  # noqa: BLE001 — "no extractor" is the normal case
             errors.append(str(exc).replace("\n", " ")[:220])
+        # A rich map already? stop hammering the site.
         if infos and max((f.get("height") or 0) for f in (infos[-1].get("formats") or [{"height": 0}])) > 480:
             break
-    if len(infos) == 2:
-        a, b = infos
-        if len(b.get("formats") or []) > len(a.get("formats") or []):
-            a, b = b, a
-        have = {f.get("format_id") for f in a.get("formats") or []}
-        info = dict(a)
-        info["formats"] = (a.get("formats") or []) + [f for f in (b.get("formats") or [])
-                                                        if f.get("format_id") not in have]
+    if infos:
+        infos.sort(key=lambda i: -len(i.get("formats") or []))
+        info = dict(infos[0])
+        seen_ids: set = set()
+        merged_fmt: list[dict] = []
+        for cand in infos:
+            for f in cand.get("formats") or []:
+                fid = f.get("format_id")
+                if fid not in seen_ids:
+                    seen_ids.add(fid)
+                    merged_fmt.append(f)
+        info["formats"] = merged_fmt
     else:
-        info = infos[0] if infos else None
+        info = None
     if not info:
         return None, " · ".join(dict.fromkeys(errors))
     if info.get("_type") == "playlist":
@@ -301,8 +475,8 @@ async def _try_ytdlp(url: str) -> tuple[dict | None, str]:
 # ---------------------------------------------------------------------------
 # Page scanning — crawl a result page for hidden direct file links
 # ---------------------------------------------------------------------------
-_OG_RE = re.compile('<meta[^>]+property=["\']og:(?:video|audio|image)(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']')
-_VIDSRC_RE = re.compile('<(?:video|source)[^>]+src=["\']([^"\']+)["\']')
+_OG_RE = re.compile('<meta[^>]+property=["\']og:(?:video|audio|image)(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']', re.I)
+_VIDSRC_RE = re.compile('<(?:video|source)[^>]+src=["\']([^"\']+)["\']', re.I)
 
 async def scan_page(url: str, limit: int = 12, wanted=None) -> list[dict]:
     """Deep-scan one page for hidden direct media files.
@@ -333,14 +507,14 @@ async def scan_page(url: str, limit: int = 12, wanted=None) -> list[dict]:
            and not _re.search(r"\.(mp4|mkv|webm|mov|avi|flv|m4v|zip|rar|7z|t?gz|epub|pdf|djvu|mp3|flac|ogg|m4a|wav|opus|aac)$", full, _re.I):
             return
         seen.add(full)
-        entry = {"url": full, "filename": unquote(dk.guess_filename(full, "file")),
-                 "file_type": dk.classify(full), "size_bytes": size}
+        entry = {"url": full, "filename": unquote(fk.guess_filename(full, "file")),
+                 "file_type": fk.classify(full), "size_bytes": size}
         out.append(entry)
 
     # og: + <source>/<video> tags
-    for m in _re.finditer(_OG_RE, text, _re.I):
+    for m in _re.finditer(_OG_RE, text):
         _push(urljoin(str(resp.url), unescape_html(m.group(1))))
-    for m in _re.finditer(_VIDSRC_RE, text, _re.I):
+    for m in _re.finditer(_VIDSRC_RE, text):
         _push(urljoin(str(resp.url), unescape_html(m.group(1))))
     # plain file anchors + directory listings (name  <tab> size)
     for m in _re.finditer(MEDIA_HREF_RE, text):
@@ -381,13 +555,25 @@ def unescape_html(s: str) -> str:
 # ---------------------------------------------------------------------------
 async def plan_download(url: str, title: str = "", fmt: dict | None = None) -> dict:
     """Return the enqueue kwargs for any URL (used by result cards & direct link)."""
-    if settings.get("demo_mode"):
-        return {"url": url, "kind": "sim", "title": title or dk.guess_filename(url),
-                "file_type": dk.classify(url), "meta": {}}
-    ext = dk.url_extension(url)
-    if ext in dk.STREAM_EXTS:
-        return {"url": url, "kind": "hls", "title": title or dk.guess_filename(url),
-                "file_type": "video", "meta": {}}
+    ext = fk.url_extension(url)
+    if ext in fk.STREAM_EXTS:
+        fmt = fmt or {}
+        meta: dict = {}
+        kind = "hls"
+        try:
+            import yt_dlp  # noqa: F401
+            have_yt = True
+        except ImportError:
+            have_yt = False
+        if fmt.get("format") and fmt["format"] != "bv*+ba/b":
+            if have_yt:      # yt-dlp resolves variant idx / rep-id with audio muxing
+                kind, meta = "ytdlp", {"format": fmt["format"], "quality": fmt.get("label", "")}
+            elif fmt.get("url"):
+                kind, meta = "hls", {"variant_url": fmt["url"], "quality": fmt.get("label", "")}
+        elif have_yt:
+            kind, meta = "ytdlp", {"format": "bv*+ba/b", "quality": "Best (auto)"}
+        return {"url": url, "kind": kind, "title": title or fk.guess_filename(url),
+                "file_type": "video", "meta": meta}
     if url.lower().startswith("magnet:"):
         return {"url": url, "kind": "magnet", "title": _magnet_title(url),
                 "file_type": "magnet", "meta": {}}
@@ -411,242 +597,8 @@ async def plan_download(url: str, title: str = "", fmt: dict | None = None) -> d
                          "extractor": media["extractor"]}}
     # If the user explicitly chose a format card, trust yt-dlp.
     if fmt and fmt.get("format"):
-        return {"url": url, "kind": "ytdlp", "title": title or dk.guess_filename(url),
+        return {"url": url, "kind": "ytdlp", "title": title or fk.guess_filename(url),
                 "file_type": "video", "meta": {"format": fmt["format"],
                                                "quality": fmt.get("label", "")}}
-    return {"url": url, "kind": "http", "title": title or dk.guess_filename(url),
-            "file_type": dk.classify(url), "meta": {}}
-
-
-# ---------------------------------------------------------------------------
-# Demo payloads (offline UI preview)
-# ---------------------------------------------------------------------------
-def _demo_payload(url: str) -> dict:
-    host = urlparse(url).netloc or url
-    ext = dk.url_extension(url)
-    if ext in dk.STREAM_EXTS:
-        return {"kind": "hls", "url": url, "file_type": "video",
-                "title": f"Demo HLS stream — {host}", "demo": True,
-                "ffmpeg": find_ffmpeg()["available"], "duration": 4520,
-                "streams": [{"type": "video", "codec": "h264", "width": 1920, "height": 1080},
-                            {"type": "audio", "codec": "aac"}], "bit_rate": 5_200_000}
-    formats = [
-        {"height": 2160, "label": "2160p 4K", "codecs": ["mp4", "webm"], "fps": 60, "format": "bestvideo[height<=2160]+bestaudio", "size": 1_930_000_000},
-        {"height": 1080, "label": "1080p", "codecs": ["mp4", "webm"], "fps": 30, "format": "bestvideo[height<=1080]+bestaudio", "size": 486_000_000},
-        {"height": 720, "label": "720p", "codecs": ["mp4", "webm"], "fps": 30, "format": "bestvideo[height<=720]+bestaudio", "size": 194_000_000},
-        {"height": 0, "label": "Audio only (m4a)", "codecs": ["m4a"], "fps": 0, "format": "bestaudio", "size": 12_400_000},
-    ]
-    is_media_host = any(h in host for h in ("youtu", "vimeo", "dailymotion", "twitch", "tiktok"))
-    if is_media_host or not ext:
-        return {"kind": "media", "url": url, "demo": True, "file_type": "video",
-                "extractor": "youtube-dlp-demo", "title": f"Demo video — {host}",
-                "uploader": "WebFinder Demo Channel", "duration": 814, "view_count": 2_417_902,
-                "thumbnail": "", "webpage": url, "formats": formats,
-                "formats_total": 41, "needs_ffmpeg_merge": not find_ffmpeg()["available"],
-                "ffmpeg": find_ffmpeg()["available"]}
-    return {"kind": "direct", "url": url, "demo": True,
-            "title": dk.guess_filename(url), "filename": dk.guess_filename(url),
-            "file_type": dk.classify(url), "content_type": "application/octet-stream",
-            "size": 734_000_000, "accepts_ranges": True}
-
-
-def demo_image_results(query: str, limit: int) -> dict:
-    import hashlib
-    sizes = [(1920, 1080), (2560, 1440), (1200, 1600), (800, 800), (3840, 2160), (1600, 900)]
-    results = []
-    for i in range(min(limit, 18)):
-        w, h = sizes[i % len(sizes)]
-        seed = hashlib.md5(f"{query}{i}".encode()).hexdigest()[:8]
-        results.append({
-            "title": f"{query.title()} — demo photo #{i + 1}",
-            "url": f"https://picsum.photos/seed/{seed}/{w}/{h}",
-            "thumb": f"https://picsum.photos/seed/{seed}/480/320",
-            "page": f"https://demo.photos/p/{seed}",
-            "domain": "demo.photos", "engine": ["bing", "duckduckgo", "google"][i % 3],
-            "snippet": "", "size_bytes": None, "file_type": "image", "is_direct": True,
-            "width": w, "height": h, "duration": None, "demo": True,
-        })
-    return {"query": query, "raw_query": query, "types": ["image"], "mode": "images",
-            "elapsed_ms": 280, "demo": True, "vertical_blocked": False,
-            "engines": [{"engine": e, "ok": True, "error": "", "count": 6}
-                        for e in ("bing", "duckduckgo", "google")],
-            "results": results}
-
-
-def demo_video_results(query: str, limit: int) -> dict:
-    import hashlib
-    sample = "https://test-videos.co.uk/vids/bigbuckbunny/mp4/h264/1080/Big_Buck_Bunny_1080_10s_1MB.mp4"
-    results = []
-    for i in range(min(limit, 12)):
-        seed = hashlib.md5(f"{query}v{i}".encode()).hexdigest()[:8]
-        results.append({
-            "title": f"{query.title()} — demo clip {i + 1}",
-            "url": sample if i % 3 else f"https://demo.video/{seed}.mp4",
-            "thumb": f"https://picsum.photos/seed/{seed}/480/270",
-            "page": f"https://demo.video/watch/{seed}",
-            "domain": "demo.video", "engine": ["duckduckgo", "bing", "web_dorks"][i % 3],
-            "snippet": "", "size_bytes": None, "file_type": "video", "is_direct": True,
-            "width": 0, "height": (720, 1080, 480)[i % 3],
-            "duration": [95, 244, 1210, 58][i % 4], "publisher": "DemoTube", "demo": True,
-        })
-    return {"query": query, "raw_query": query, "types": ["video"], "mode": "videos",
-            "elapsed_ms": 320, "demo": True, "vertical_blocked": False,
-            "engines": [{"engine": e, "ok": True, "error": "", "count": 4}
-                        for e in ("duckduckgo", "bing", "web_dorks")],
-            "results": results}
-
-
-def build_search_results(query: str, types: list[str], engines: list[str], limit: int) -> dict:
-    """Synthetic-but-plausible result set for demo mode."""
-    import hashlib
-    domains = ["archive.org", "data.hobbyist.net", "cdn.filepile.io", "files.openstack.dev",
-               "mirror.linux-iso.org", "media.poolcloud.tv", "repo.fossware.dev", "torrentbay.alt"]
-    ext_map = {"video": ["mp4", "mkv", "webm"], "image": ["jpg", "png", "webp"],
-               "torrent": ["torrent"], "magnet": [""], "software": ["exe", "msi"],
-               "archive": ["zip", "7z", "rar"], "audio": ["mp3", "flac"], "ebook": ["pdf", "epub"],
-               "link": ["pdf", "html"]}
-    results = []
-    ts = types or ["link"]
-    for i in range(min(limit, 18)):
-        t = ts[i % len(ts)]
-        exts = ext_map.get(t, ext_map["link"])
-        ext = exts[i % len(exts)]
-        dom = domains[int(hashlib.md5(f"{query}{i}".encode()).hexdigest()[:6], 16) % len(domains)]
-        if t == "magnet":
-            h = hashlib.sha1(f"{query}{i}".encode()).hexdigest()
-            url = f"magnet:?xt=urn:btih:{h}&dn={query.replace(' ', '+')}.{i}&tr=udp://tracker.opentrackr.org:1337/announce"
-            title = f"{query.title()} — magnet #{i + 1}"
-        else:
-            slug = re.sub(r"[^\w]+", "-", query.lower()).strip("-") or "file"
-            url = f"https://{dom}/files/{slug}-{i:02d}.{ext}"
-            title = f"{query.title()} ({['Complete', 'Remastered', 'Pack Vol. ' + str(i), 'Archive', 'Full'][i % 5]})"
-        size = int(hashlib.md5(url.encode()).hexdigest()[:5], 16) * 4096 + 12_000_000
-        results.append({"title": title, "url": url,
-                        "snippet": f"Demo result for “{query}”. Verified mirror with fast seeds, "
-                                   f"no captcha and direct download. Size {size / 1024 / 1024:.1f} MB.",
-                        "domain": dom, "engine": engines[i % len(engines)] if engines else "demo",
-                        "size_bytes": size, "file_type": t if t != "link" else "link",
-                        "is_direct": t != "link"})
-    return {
-        "query": dk.build_query(query, types),
-        "elapsed_ms": 340,
-        "demo": True,
-        "engines": [{"engine": e, "ok": True, "error": "", "count": len(results) // max(1, len(engines) or 1)}
-                    for e in (engines or ["demo"])],
-        "results": results,
-    }
-
-
-def demo_torrent_results(query: str, limit: int) -> dict:
-    import hashlib
-    from urllib.parse import quote_plus
-    sizes = [747_124_572, 1_932_735_283, 38_224_524, 4_295_000_000, 862_419_712]
-    results = []
-    for i in range(min(limit, 15)):
-        h = hashlib.md5(f"t{query}{i}".encode()).hexdigest()
-        results.append({
-            "title": f"{query.title()} [1080p x264] — demo release {i + 1}",
-            "url": f"magnet:?xt=urn:btih:{h}&dn={quote_plus(query)}",
-            "torrent_url": f"https://demo.torrents/site/{h}.torrent",
-            "thumb": "", "page": f"https://demo.torrents/t/{i + 1000}/",
-            "domain": "demo.torrents", "engine": ["apibay", "nyaa", "1337x"][i % 3],
-            "size_bytes": sizes[i % len(sizes)], "seeders": 240 - i * 12,
-            "leechers": 30 + i, "files": 2 + i % 14, "age": "2026-09-1X",
-            "file_type": "torrent", "is_direct": False, "duration": None, "demo": True,
-        })
-    return {"query": query, "raw_query": query, "types": ["torrent"], "mode": "torrents",
-            "elapsed_ms": 260, "demo": True, "vertical_blocked": False,
-            "engines": [{"engine": e, "ok": True, "error": "", "count": 5}
-                        for e in ("apibay", "nyaa", "1337x")],
-            "results": results}
-
-
-def demo_ebook_results(query: str, limit: int) -> dict:
-    import hashlib
-    results = []
-    for i in range(min(limit, 14)):
-        seed = hashlib.md5(f"b{query}{i}".encode()).hexdigest()[:8]
-        ext = ["epub", "pdf", "epub", "djvu"][i % 4]
-        results.append({
-            "title": f"{query.title()} — demo library edition {i + 1}",
-            "url": f"https://www.gutenberg.org/files/demo/{seed}.{ext}",
-            "thumb": f"https://picsum.photos/seed/{seed}/300/420",
-            "page": f"https://archive.org/details/demo_{seed}",
-            "domain": "gutenberg.org", "engine": ["gutenberg", "internetarchive"][i % 2],
-            "size_bytes": (i + 3) * 1_400_000, "width": 0, "height": 0,
-            "publisher": ["A. Author", "B. Writer", "C. Novelist"][i % 3],
-            "year": str(1880 + i * 7), "file_type": "book", "is_direct": True,
-            "duration": None, "demo": True,
-        })
-    return {"query": query, "raw_query": query, "types": ["ebook"], "mode": "ebooks",
-            "elapsed_ms": 300, "demo": True, "vertical_blocked": False,
-            "engines": [{"engine": e, "ok": True, "error": "", "count": 7}
-                        for e in ("gutenberg", "internetarchive")],
-            "results": results}
-
-
-def demo_audio_results(query: str, limit: int) -> dict:
-    import hashlib
-    results = []
-    for i, ft in enumerate(["mp3", "flac", "mp3", "ogg", "m4a", "wav", "mp3", "opus"]):
-        seed = hashlib.md5(f"m{query}{i}".encode()).hexdigest()[:10]
-        results.append({
-            "title": f"{query.title()} — demo track {i + 1}.{ft}",
-            "url": f"https://archive.org/download/demo_{seed}/{query.replace(' ', '_')}_trk{i:02d}.{ft}",
-            "thumb": "", "page": f"https://archive.org/details/demo_{seed}",
-            "domain": "archive.org", "engine": ["internetarchive", "ccmixter", "bing"][i % 3],
-            "snippet": "Demo file — demo mode is ON in Settings.",
-            "size_bytes": (i + 2) * 4_900_000, "file_type": ft, "is_direct": True,
-            "width": 0, "height": 0, "duration": 180 + i * 47, "publisher": "Demo Artist",
-        })
-    return {"query": query, "raw_query": query, "types": ["audio"], "mode": "audios",
-            "elapsed_ms": 18, "filters": {}, "vertical_blocked": False, "demo": True,
-            "engines": [{"engine": e, "ok": True, "error": "", "count": 3}
-                        for e in ("internetarchive", "ccmixter", "web_dorks")],
-            "results": results[:limit]}
-
-
-def demo_software_results(query: str, limit: int) -> dict:
-    import hashlib
-    results = []
-    for i, (ft, host) in enumerate([("exe", "github.com"), ("apk", "f-droid.org"),
-                                    ("msi", "github.com"), ("zip", "files.example.org"),
-                                    ("dmg", "github.com"), ("apk", "f-droid.org"),
-                                    ("AppImage", "github.com"), ("deb", "github.com")]):
-        seed = hashlib.md5(f"s{query}{i}".encode()).hexdigest()[:10]
-        results.append({
-            "title": f"{query.title()} {['2.1.0', '11.4', '0.9.3', '3.0.1'][i % 4]} ({ft}) — demo release",
-            "url": f"https://cdn.{host}/releases/{seed}/{query.replace(' ', '-').lower()}-{i}.{ft.lower()}",
-            "thumb": "", "page": f"https://{host}/owner/{query.replace(' ', '-').lower()}",
-            "domain": host, "engine": ["github", "fdroid", "bing"][i % 3],
-            "snippet": "Demo asset — demo mode is ON in Settings.",
-            "size_bytes": (i + 3) * 14_700_000, "file_type": ft, "is_direct": True,
-            "width": 0, "height": 0, "duration": None, "publisher": f"{query.split()[0].title()} project",
-        })
-    return {"query": query, "raw_query": query, "types": ["software"], "mode": "software",
-            "elapsed_ms": 21, "filters": {}, "vertical_blocked": False, "demo": True,
-            "engines": [{"engine": e, "ok": True, "error": "", "count": 3}
-                        for e in ("github", "fdroid", "web_dorks")],
-            "results": results[:limit]}
-
-
-def demo_archive_results(query: str, limit: int) -> dict:
-    import hashlib
-    results = []
-    for i in range(min(limit, 12)):
-        seed = hashlib.md5(f"a{query}{i}".encode()).hexdigest()[:8]
-        ext = ["zip", "rar", "7z", "tar.gz"][i % 4]
-        results.append({
-            "title": f"{query.title()}.{ext} — demo mirror {i + 1}",
-            "url": f"https://files.example.org/pub/{seed}/{query.replace(' ', '_')}.{ext}",
-            "thumb": "", "page": "",
-            "domain": "files.example.org", "engine": ["bing", "duckduckgo", "mojeek"][i % 3],
-            "snippet": "Directory listing with checksums and mirrors.",
-            "size_bytes": (i + 2) * 23_500_000, "file_type": "archive",
-            "is_direct": True, "width": 0, "height": 0, "duration": None, "demo": True,
-        })
-    return {"query": query, "raw_query": query, "types": ["archive"], "mode": "archives",
-            "elapsed_ms": 340, "demo": True, "vertical_blocked": False,
-            "engines": [{"engine": e, "ok": True, "error": "", "count": 4}
-                        for e in ("bing", "duckduckgo", "mojeek")],
-            "results": results}
+    return {"url": url, "kind": "http", "title": title or fk.guess_filename(url),
+            "file_type": fk.classify(url), "meta": {}}

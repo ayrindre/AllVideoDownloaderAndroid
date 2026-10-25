@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WebFinder — entry point.
+"""All Video Downloader — entry point.
 
     python run.py                # native frameless window (needs pywebview),
                                  # falls back to the default browser
@@ -54,7 +54,7 @@ def _hold_open() -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="WebFinder — smart file search & downloader")
+    parser = argparse.ArgumentParser(description="All Video Downloader — paste any video link, pick a quality, get the file")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--browser", action="store_true",
@@ -64,7 +64,7 @@ def main() -> None:
 
     missing = _deps_missing()
     if missing:
-        print(f"[webfinder] Python package '{missing}' is not installed for THIS interpreter.")
+        print(f"[avd] Python package '{missing}' is not installed for THIS interpreter.")
         print("            You are probably running with the system Python instead of the project venv.")
         print()
         print("  Windows : double-click  run.bat   (creates .venv + installs everything)")
@@ -89,13 +89,13 @@ def main() -> None:
         local = (bin_dir / f"ffmpeg{suf}").exists() and (bin_dir / f"ffprobe{suf}").exists()
         if not (on_path or local):
             if os.environ.get("WEBFINDER_NO_FFMPEG_INSTALL"):
-                print("[webfinder] FFmpeg unavailable and auto-install disabled — HLS/DASH capture stays off.")
+                print("[avd] FFmpeg unavailable and auto-install disabled — HLS/DASH capture stays off.")
             else:
-                print("[webfinder] FFmpeg missing: auto-installing into the app's bin/ folder "
+                print("[avd] FFmpeg missing: auto-installing into the app's bin/ folder "
                       "(opt out with WEBFINDER_NO_FFMPEG_INSTALL=1)…")
-                ffmpeg_setup.ensure_ffmpeg(progress=lambda m: print(f"[webfinder]   {m}"))
+                ffmpeg_setup.ensure_ffmpeg(progress=lambda m: print(f"[avd]   {m}"))
     except Exception as exc:  # noqa: BLE001 — never let the helper break launch
-        print(f"[webfinder] ffmpeg bootstrap skipped: {exc}")
+        print(f"[avd] ffmpeg bootstrap skipped: {exc}")
 
     # Keep yt-dlp fresh: YouTube rewrites its anti-bot rules weekly and a stale
     # local copy is the #1 cause of "only 480p offered" / "Sign in to confirm
@@ -114,9 +114,9 @@ def main() -> None:
                             capture_output=True, text=True, timeout=240)
                 if r.returncode == 0:
                     stamp.touch()
-                    print("[webfinder] yt-dlp refreshed — restart the app to load the new version.")
+                    print("[avd] yt-dlp refreshed — restart the app to load the new version.")
                 else:
-                    print("[webfinder] yt-dlp self-update skipped (offline or pip unavailable).")
+                    print("[avd] yt-dlp self-update skipped (offline or pip unavailable).")
             except Exception:  # noqa: BLE001 — pure nicety
                 pass
 
@@ -127,9 +127,9 @@ def main() -> None:
 
     url = f"http://127.0.0.1:{args.port}"
 
-    # A WebFinder backend is already answering on this port → don't double-bind.
+    # An All Video Downloader backend is already answering on this port → don't double-bind.
     if _server_alive(url):
-        print(f"[webfinder] A WebFinder backend is already running on {url} — opening it.")
+        print(f"[avd] An All Video Downloader backend is already running on {url} — opening it.")
         if not args.no_open:
             webbrowser.open(url)
         _hold_open()
@@ -141,15 +141,15 @@ def main() -> None:
         try:
             if launch(args.port, args.host):
                 return
-            print("[webfinder] pywebview not installed — falling back to browser mode.")
-            print("[webfinder] install the desktop shell with:  pip install pywebview")
+            print("[avd] pywebview not installed — falling back to browser mode.")
+            print("[avd] install the desktop shell with:  pip install pywebview")
         except Exception as exc:  # noqa: BLE001 — the shell can fail for many GUI reasons
-            print(f"[webfinder] desktop shell failed ({exc}) — falling back to browser mode.")
+            print(f"[avd] desktop shell failed ({exc}) — falling back to browser mode.")
             if _server_alive(url):
                 # backend thread is already serving; just open the browser on it.
                 if not args.no_open:
                     webbrowser.open(url)
-                print(f"[webfinder] WebFinder is running at {url} (browser mode). Ctrl+C to stop.")
+                print(f"[avd] All Video Downloader is running at {url} (browser mode). Ctrl+C to stop.")
                 _hold_open()
                 return
 

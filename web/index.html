@@ -4,8 +4,8 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' data: blob: https: http: ws: wss:;" />
-<title>WebFinder</title>
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23a855f7'/%3E%3Cstop offset='1' stop-color='%234f7cff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='url(%23g)'/%3E%3Ccircle cx='14' cy='14' r='6' fill='none' stroke='%23fff' stroke-width='2.4'/%3E%3Cpath d='M19 19l6 6' stroke='%23fff' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E" />
+<title>All Video Downloader</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%23a855f7'/%3E%3Cstop offset='1' stop-color='%234f7cff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='9' fill='url(%23g)'/%3E%3Cpath d='M16 7v12m0 0l-4.5-4.5M16 19l4.5-4.5M8 23h16' stroke='%23fff' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="/static/css/base.css" />
 <link rel="stylesheet" href="/static/css/components.css" />
 <link rel="stylesheet" href="/static/css/views.css" />
@@ -23,9 +23,8 @@
   <header class="titlebar drag-region pywebview-drag-region">
     <div class="brand">
       <span class="brand-logo" id="brand-logo"></span>
-      <span class="brand-name">Web<i>Finder</i></span>
-      <span class="brand-ver" id="app-version">v1.0</span>
-      <span class="badge badge-demo hidden" id="demo-badge">DEMO DATA</span>
+      <span class="brand-name">All<i>Video</i> Downloader</span>
+      <span class="brand-ver" id="app-version">v2.0</span>
     </div>
     <div class="titlebar-tools">
       <span class="net-status" id="net-status" title="Backend connection">
@@ -50,81 +49,26 @@
           <span class="sw-icon"></span>
           <span class="sw-text"><b id="sw-value">0</b><i id="sw-unit">B/s</i></span>
         </div>
-        <button class="collapse-btn about-btn" id="btn-about" title="About WebFinder"></button>
-        <button class="collapse-btn" id="btn-collapse" title="Collapse sidebar"></button>
+        <button class="collapse-btn about-btn" id="btn-about" title="About All Video Downloader"></button>
+        <button class="collapse-btn exit-btn" id="btn-exit" title="Exit All Video Downloader"></button>
       </div>
     </aside>
 
     <!-- ────────────────────────────── viewport ────────────────────────────── -->
     <main class="viewport" id="viewport">
 
-      <!-- =============== SEARCH =============== -->
-      <section class="view active" id="view-search" data-title="Search">
-        <div class="hero" id="search-hero">
-          <h1 class="hero-title">Find <span class="grad-text">anything</span> worth downloading.</h1>
-          <p class="hero-sub">Multi-engine file search with smart dorks, direct links and a built-in downloader.</p>
-
-          <form class="search-dock" id="search-form" autocomplete="off">
-            <div class="search-bar">
-              <span class="sb-icon" id="sb-search-icon"></span>
-              <input id="q" type="text" spellcheck="false" placeholder="Search for files, tools, archives, torrents…" aria-label="Search query" />
-              <button type="button" class="sb-clear hidden" id="q-clear" title="Clear"></button>
-              <button type="submit" class="sb-go" id="sb-go" title="Search">
-                <span class="sb-go-label">Search</span><span class="sb-go-icon"></span>
-              </button>
-            </div>
-
-            <div class="filter-row">
-              <div class="chip-set" id="type-chips" role="group" aria-label="File types"><!-- chips injected --></div>
-            </div>
-            <div class="filter-row filter-row-sub">
-              <div class="engine-set" id="engine-set" aria-label="Search engines"><!-- engine pills injected --></div>
-              <div class="search-extras">
-                <button type="button" class="epill" id="safe-pill" title="SafeSearch — off returns every result the engine indexes"></button>
-                <button type="button" class="epill filters-btn" id="filters-btn" title="Per-file-type search filters"></button>
-                <label class="switch-line" id="resolve-wrap" title="Scan result pages for hidden direct file links (web results only)">
-                  <input type="checkbox" id="opt-resolve" checked /><span class="switch"></span>
-                  <span class="switch-txt">Deep-link scan</span>
-                </label>
-              </div>
-            </div>
-            <div class="query-preview hidden" id="query-preview"></div>
-          </form>
-        </div>
-
-        <div class="results-wrap hidden" id="results-wrap">
-          <div class="results-head">
-            <div class="rh-left">
-              <button class="btn btn-ghost btn-sm" id="back-hero"></button>
-              <h2 class="rh-title" id="rh-title">Results</h2>
-              <span class="rh-meta" id="rh-meta"></span>
-            </div>
-            <div class="rh-right">
-              <div class="segmented" id="result-filter">
-                <button class="seg active" data-f="all">All</button>
-                <button class="seg" data-f="direct">Direct files</button>
-              </div>
-              <button class="btn btn-ghost btn-sm" id="re-run" title="Run search again"></button>
-            </div>
-          </div>
-          <div class="engine-strip" id="engine-strip"></div>
-          <div class="results-grid" id="results-grid"></div>
-          <div class="results-empty hidden" id="results-empty"></div>
-        </div>
-      </section>
-
       <!-- =============== SMART DIRECT LINK =============== -->
-      <section class="view" id="view-direct" data-title="Smart Direct Link">
-        <div class="page-head">
-          <h1 class="page-title">Smart <span class="grad-text">Direct Link</span></h1>
-          <p class="page-sub">Paste any URL — YouTube, Vimeo, a raw <code>.m3u8</code> stream, a torrent or a file — WebFinder figures out the best way to bring it home.</p>
+      <section class="view active" id="view-direct" data-title="Grab a video">
+        <div class="hero" id="grab-hero">
+          <h1 class="hero-title">Download <span class="grad-text">any video</span>. Any source.</h1>
+          <p class="hero-sub">Paste a link — YouTube, a raw <code>.mp4</code>, an <code>.m3u8</code> / <code>.mpd</code> stream, or any page hosting one. Every quality found becomes a button.</p>
         </div>
         <div class="dock">
           <div class="paste-bar">
             <span class="pb-icon" id="pb-icon"></span>
-            <input type="text" id="direct-url" spellcheck="false" placeholder="https://www.youtube.com/watch?v=…  ·  https://host/video.m3u8  ·  magnet:?xt=urn:btih:…" aria-label="URL to analyze" />
+            <input type="text" id="direct-url" spellcheck="false" placeholder="https://www.youtube.com/watch?v=…  ·  https://host/video.m3u8  ·  magnet:?xt=urn:btih:…" aria-label="Video URL" />
             <button class="btn btn-ghost btn-sm" id="pb-paste" title="Paste from clipboard">Paste</button>
-            <button class="btn btn-primary" id="btn-analyze"><span class="btn-ico"></span><span>Analyze</span></button>
+            <button class="btn btn-primary" id="btn-analyze"><span class="btn-ico"></span><span>Grab it</span></button>
           </div>
           <div class="quick-links" id="quick-links"></div>
         </div>
@@ -138,7 +82,7 @@
         <div class="page-head head-inline">
           <div>
             <h1 class="page-title">Download <span class="grad-text">Manager</span></h1>
-            <p class="page-sub" id="dl-subtitle">Nothing in flight — start something from Search or Direct Link.</p>
+            <p class="page-sub" id="dl-subtitle">Nothing in flight — paste a link and hit Grab it.</p>
           </div>
           <div class="head-actions">
             <button class="btn btn-ghost btn-sm" id="dl-pause-all">Pause all</button>
@@ -162,7 +106,7 @@
       <section class="view" id="view-settings" data-title="Settings">
         <div class="page-head">
           <h1 class="page-title">Settings</h1>
-          <p class="page-sub">Everything is persisted to <code id="cfg-path">~/.webfinder/settings.json</code>.</p>
+          <p class="page-sub">Everything is persisted to <code id="cfg-path">~/.avd/settings.json</code>.</p>
         </div>
         <div class="settings-grid" id="settings-grid"><!-- sections injected --></div>
       </section>
@@ -173,28 +117,6 @@
 <div class="toast-stack" id="toast-stack" aria-live="polite"></div>
 <div class="modal-root hidden" id="modal-root"></div>
 
-<template id="tpl-result-card">
-  <article class="card result-card" tabindex="0">
-    <div class="rc-top">
-      <span class="rc-favicon"><img alt="" loading="lazy" /></span>
-      <div class="rc-id">
-        <h3 class="rc-title" title=""></h3>
-        <div class="rc-domain"></div>
-      </div>
-      <span class="rc-type"></span>
-    </div>
-    <p class="rc-snippet"></p>
-    <div class="rc-candidates hidden"></div>
-    <div class="rc-foot">
-      <div class="rc-tags"></div>
-      <div class="rc-actions">
-        <button class="fab fab-src" title="Visit source"><span></span></button>
-        <button class="fab fab-copy" title="Copy download link"><span></span></button>
-        <button class="fab fab-dl" title="Download in WebFinder"><span></span></button>
-      </div>
-    </div>
-  </article>
-</template>
 
 <template id="tpl-dl-row">
   <div class="dl-row">
@@ -224,7 +146,6 @@
 <script src="/static/js/api.js"></script>
 <script src="/static/js/ui.js"></script>
 <script src="/static/js/state.js"></script>
-<script src="/static/js/views/search.js"></script>
 <script src="/static/js/views/direct.js"></script>
 <script src="/static/js/views/downloads.js"></script>
 <script src="/static/js/views/settings.js"></script>

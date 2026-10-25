@@ -1,15 +1,10 @@
-/* WebFinder · state.js — tiny observable store + cross-view events */
+/* All Video Downloader · state.js — tiny observable store + cross-view events */
 (function () {
   const listeners = new Map();
   const Store = {
     settings: {},
     meta: null,
     jobs: new Map(),          // id → job dict
-    results: [],              // last search results
-    selectedTypes: new Set(),
-    selectedEngines: new Set(),
-    searchFilters: { images: {}, videos: {} },
-    lastQuery: "",
 
     on(evt, fn) {
       if (!listeners.has(evt)) listeners.set(evt, new Set());

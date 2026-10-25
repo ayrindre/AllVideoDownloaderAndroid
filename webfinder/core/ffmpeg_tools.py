@@ -1,4 +1,4 @@
-"""WebFinder — FFmpeg / ffprobe integration for stream capture & remux.
+"""All Video Downloader — FFmpeg / ffprobe integration for stream capture & remux.
 
 The app ships *without* FFmpeg (it is ~100 MB); at runtime we look it up in
 Settings → ffmpeg_path, then on PATH, then next to the executable. When it is
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import shutil
 import time
@@ -98,7 +99,10 @@ async def capture_stream(job, check_flags, publish) -> None:
     job.filepath = str(out_path)
 
     headers = job.meta.get("headers") or {}
-    info = await probe(job.url, headers)
+    # a user-picked variant: fetch THAT media playlist instead of letting
+    # ffmpeg auto-climb the master (this is what makes stream quality a CHOICE)
+    source = job.meta.get("variant_url") or job.url
+    info = await probe(source, headers)
     duration = int(info.get("duration") or 0)
     job.unit = "time"
     job.total = duration
@@ -107,10 +111,10 @@ async def capture_stream(job, check_flags, publish) -> None:
     reencode = bool(job.meta.get("reencode"))
     args = [bins["ffmpeg"], "-hide_banner", "-nostdin", "-loglevel", "error",
             "-progress", "pipe:1", "-nostats", "-y",
-            "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WebFinder/1.0"]
+            "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AVD/2.0"]
     for k, v in headers.items():
         args += [f"-{k.lower()}", v]
-    args += ["-i", job.url]
+    args += ["-i", source]
     if reencode:
         args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                  "-c:a", "aac", "-b:a", "192k"]
@@ -121,8 +125,12 @@ async def capture_stream(job, check_flags, publish) -> None:
     args.append(str(out_path))
 
     t0, last_emit = time.time(), 0.0
+    env = None
+    px = (settings.get("proxy") or "").strip()
+    if px:
+        env = {**os.environ, "http_proxy": px, "https_proxy": px}
     proc = await asyncio.create_subprocess_exec(
-        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env)
     assert proc.stdout is not None
     try:
         while True:

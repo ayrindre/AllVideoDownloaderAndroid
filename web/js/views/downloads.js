@@ -1,4 +1,4 @@
-/* WebFinder · views/downloads.js — Download Manager: animated rows, stats, sparkline */
+/* All Video Downloader · views/downloads.js — Download Manager: animated rows, stats, sparkline */
 (function () {
   const { $, el, fmtBytes, fmtSpeed, fmtEta, animateNumber } = window.UI;
   const S = window.Store;
@@ -129,7 +129,7 @@
     animateNumber($("#st-saved"), S.totalSaved(), (v) => fmtBytes(v));  // textContent sink — no HTML here (that showed a literal <i>)
     $("#dl-subtitle").textContent = active
       ? `${active} in the pipe — controls live on each row; every transfer also keeps its source link one click away.`
-      : (S.jobs.size ? "Idle. Retry or clear finished transfers to tidy the list." : "Nothing in flight — start something from Search or Direct Link.");
+      : (S.jobs.size ? "Idle. Retry or clear finished transfers to tidy the list." : "Nothing in flight — paste a link and hit Grab it.");
     const empty = $("#dl-empty");
     if (!S.jobs.size) {
       empty.classList.remove("hidden");
