@@ -16,18 +16,28 @@ straight to the anonymous path and tell the user exactly what to fix.
 """
 from __future__ import annotations
 
+import os
 import re
 import threading
+import time
 from pathlib import Path
 
-from ..config import settings
+from ..config import CONFIG_DIR, settings
 
 # yt-dlp / gallery-dl / our own wording for "the cookie source did not work"
 _COOKIE_ERR = re.compile(
-    r"could not copy|could not read|cookie database|unable to (?:read|load|decrypt)"
-    r"|failed to (?:read|load|decrypt)|cookies? (?:file|not found|is empty)"
-    r"|app[- ]bound|decrypt(?:ion)? (?:failed|key)|permission denied.*cookie"
-    r"|cookie.*(?:locked|in use)",
+    # the classic ones (yt-dlp + gallery-dl wording)
+    r"could not copy|cookie database|app[- ]bound|permission denied.*cookie"
+    r"|cookie.*(?:locked|in use)"
+    # gallery-dl: "Unable to find Chrome cookies database in …"
+    r"|unable to find .{0,30}cookies database|unable to find .{0,20}cookies"
+    # "could not be decrypted" (App-Bound Encryption)
+    r"|cookies .{0,40}could not be decrypted|could not decrypt .{0,20}cookies"
+    r"|failed to decrypt with|dpapi"
+    # explicit read/load failures, but only when cookies are named
+    r"|(?:could not|unable to|failed to) (?:read|load|extract|decrypt) (?:the )?cookies?"
+    r"|cookies? (?:file (?:is )?(?:empty|invalid)|not found|is empty)"
+    r"|invalid netscape cookies\.txt",
     re.I)
 
 # a message we never want to show twice: it is a *setup* problem, not a job error
@@ -179,6 +189,103 @@ def used_source() -> str:
         alt = auto_browser()
         return f"{alt} cookies (fallback)" if alt else "anonymous (browser cookies unreadable)"
     return "anonymous"
+
+
+# ---------------------------------------------------------------------------
+# Instagram session import — paste a cookie, get a cookies.txt
+# ---------------------------------------------------------------------------
+IG_DOMAIN = ".instagram.com"
+IG_NAMES = ("sessionid", "csrftoken", "ds_user_id", "mid", "datr", "ig_did", "rur")
+_PAIR_RE = re.compile(r"([A-Za-z0-9_\-]+)=([^;,\s]+)")
+
+
+def instagram_cookie_path() -> str:
+    """Where an imported session lives (next to settings.json, not in a temp dir)."""
+    return str(Path(CONFIG_DIR) / "instagram-cookies.txt")
+
+
+def parse_cookie_input(raw: str) -> dict:
+    """Understand everything a user might paste into a "session" box.
+
+    Accepted: the bare `sessionid` value, `a=1; b=2`, a `Cookie:` header line, a
+    JSON `{"sessionid": ...}` blob, or the whole content of a Netscape
+    `cookies.txt`. Returns `{"cookies": {...}}` or `{"cookiestxt": "<text>"}`.
+    """
+    text = (raw or "").strip().strip('"\'')
+    if not text:
+        return {}
+    # a cookies.txt (tab separated, ≥7 columns) is passed through untouched
+    if any(line.count("\t") >= 6 for line in text.splitlines()):
+        return {"cookiestxt": text, "cookies": {}}
+    if text[0] in "{[":
+        try:
+            import json
+            data = json.loads(text)
+            items = data if isinstance(data, list) else [
+                {"name": k, "value": v} for k, v in data.items()]
+            cookies = {}
+            for entry in items:
+                if isinstance(entry, dict) and entry.get("name"):
+                    cookies[str(entry["name"])] = str(entry.get("value") or "")
+            if cookies:
+                return {"cookies": cookies}
+        except Exception:  # noqa: BLE001 — not JSON, keep going
+            pass
+    text = re.sub(r"^\s*cookie\s*:\s*", "", text, flags=re.I)
+    if "=" not in text:
+        # a bare value: sessionid is the only one this makes sense for
+        return {"cookies": {"sessionid": text}} if len(text) > 12 else {}
+    pairs = dict(_PAIR_RE.findall(text))
+    known = {k: v for k, v in pairs.items() if k in IG_NAMES}
+    # keep the unknown names too when nothing useful was recognised, so the error
+    # can say "there is no sessionid here" instead of "nothing usable"
+    return {"cookies": known or pairs} if pairs else {}
+
+
+def save_instagram_session(raw: str) -> dict:
+    """Store the pasted session as a cookies.txt the engines already understand."""
+    parsed = parse_cookie_input(raw)
+    if not parsed:
+        return {"ok": False, "message": ("Nothing usable in that paste — it should contain "
+                                         "sessionid=… (or the whole cookies.txt content).")}
+
+    path = Path(instagram_cookie_path())
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if parsed.get("cookiestxt"):
+        text = parsed["cookiestxt"]
+        path.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
+        count = count_netscape(str(path))
+        if not count:
+            path.unlink(missing_ok=True)
+            return {"ok": False, "message": "That cookies.txt has no cookie rows in it."}
+    else:
+        cookies = parsed.get("cookies") or {}
+        if not cookies.get("sessionid"):
+            return {"ok": False, "message": (
+                "That paste has no sessionid — open instagram.com → DevTools → Application → "
+                "Cookies → https://www.instagram.com and copy the value of the sessionid row "
+                "(or use “copy as cURL” and paste the whole cookie line).")}
+        expires = int(time.time()) + 365 * 86400
+        lines = ["# Netscape HTTP Cookie File",
+                 "# written by All Video Downloader — an Instagram login session"]
+        for name, value in cookies.items():
+            lines.append(f"{IG_DOMAIN}\tTRUE\t/\tTRUE\t{expires}\t{name}\t{value}")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        count = len(cookies)
+
+    try:
+        os.chmod(path, 0o600)          # it is a login credential
+    except OSError:
+        pass
+
+    settings.update({"cookies_file": str(path)})
+    reset()                            # a fresh source must be tried, not skipped
+    names = ", ".join(sorted(parsed.get("cookies") or {})) or f"{count} cookies"
+    return {"ok": True, "path": str(path), "count": count, "names": names,
+            "instagram": True,
+            "message": (f"Instagram session saved ({names}). Scan again — the checker now "
+                        "reads it instead of your browser's locked cookie database.")}
 
 
 # ---------------------------------------------------------------------------

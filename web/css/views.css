@@ -313,6 +313,15 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
 .ig-session.warn { border-color: rgba(251,191,36,.4); color: #ffe6b0; }
 .ig-session.warn .dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
 .ig-session.muted { opacity: .9; }
+.ig-session-btn { gap: 6px; }
+.ig-session-form { display: flex; flex-direction: column; gap: 12px; }
+.ig-session-help { font-size: 12px; color: var(--text-2); line-height: 1.65;
+  background: var(--panel); border: 1px solid var(--panel-border); border-radius: 12px; padding: 12px 14px; }
+.ig-session-help p + p { margin-top: 6px; }
+.ig-session-help code { font-size: 11.5px; color: var(--accent); background: rgba(255,255,255,.05);
+  padding: 1px 5px; border-radius: 5px; }
+.ig-session-input { font-family: ui-monospace, "Cascadia Mono", Menlo, monospace; font-size: 11.5px;
+  resize: vertical; min-height: 84px; line-height: 1.5; }
 .ig-stage { margin-top: 22px; display: flex; flex-direction: column; gap: 14px; }
 .ig-idle { text-align: center; padding: 46px 26px; display: flex; flex-direction: column;
   align-items: center; gap: 10px; }

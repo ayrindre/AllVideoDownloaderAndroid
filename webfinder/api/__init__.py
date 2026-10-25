@@ -47,6 +47,10 @@ class SettingsPatch(BaseModel):
     patch: dict
 
 
+class SessionImportRequest(BaseModel):
+    value: str = ""                                    # sessionid, cookie line or cookies.txt
+
+
 class GalleryScanRequest(BaseModel):
     url: str = ""
     include: list[str] = Field(default_factory=list)   # posts|reels|stories|highlights|tagged
@@ -121,6 +125,15 @@ async def cookies_probe():
     import asyncio
     from ..core import cookies as cookie_state
     return await asyncio.to_thread(cookie_state.probe)
+
+
+@router.post("/cookies/instagram-session")
+async def cookies_instagram_session(body: SessionImportRequest):
+    """Store a pasted Instagram login as a cookies.txt (works with a locked Chrome)."""
+    from ..core import cookies as cookie_state
+    if not (body.value or "").strip():
+        raise HTTPException(status_code=400, detail="Paste the sessionid value (or a cookies.txt)")
+    return cookie_state.save_instagram_session(body.value)
 
 
 @router.post("/cookies/use-best")

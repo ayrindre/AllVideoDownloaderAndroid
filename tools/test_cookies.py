@@ -24,7 +24,7 @@ sys.path.insert(0, str(ROOT))
 TMP = Path(tempfile.mkdtemp(prefix="avd-ck-"))
 os.environ["AVD_HOME"] = str(TMP / "home")
 
-from webfinder.config import settings                      # noqa: E402
+from webfinder.config import CONFIG_DIR, settings            # noqa: E402
 from webfinder.core import cookies as CK                    # noqa: E402
 from webfinder.core import ytcli                            # noqa: E402
 from webfinder.core import gallery as G                     # noqa: E402
@@ -235,6 +235,56 @@ assert CK.mark_browser_failure("HttpError: '401 Unauthorized' (login required)")
 assert CK.browser_failure() == "" and CK.active_browser() == "chrome"
 assert CK.mark_browser_failure("Could not copy Chrome cookie database") is True
 print("✓ guard: 401s never masquerade as a broken browser cookie database")
+
+# ── pasted session: the escape hatch when the browser's cookie DB is locked ──
+# (sandbox-proven: mock Instagram returns 0 posts logged out, 4 files with a
+#  pasted sessionid and nothing else changed)
+def parse(raw):
+    return CK.parse_cookie_input(raw)
+
+
+assert parse("5123%3Aabc%3A9").get("cookies", {}).get("sessionid") == "5123%3Aabc%3A9"
+hdr = parse("Cookie: sessionid=S1; csrftoken=C1; ds_user_id=42").get("cookies", {})
+assert hdr.get("sessionid") == "S1" and hdr.get("csrftoken") == "C1", hdr
+assert parse('{"sessionid": "S2"}').get("cookies", {}).get("sessionid") == "S2"
+full = parse("# Netscape HTTP Cookie File\n.instagram.com\tTRUE\t/\tTRUE\t1999999999\tsessionid\tS3\n")
+assert (full.get("cookiestxt") and "S3" in full["cookiestxt"]) or \
+    full.get("cookies", {}).get("sessionid") == "S3", full
+assert not parse("").get("cookies") and not parse("").get("cookiestxt")
+assert parse("csrftoken=only").get("cookies", {}).get("csrftoken") == "only"
+print("✓ session: bare value, cookie: header, JSON and a whole cookies.txt all parse")
+
+sess_path = CK.instagram_cookie_path()
+assert sess_path.endswith("instagram-cookies.txt") and str(CONFIG_DIR) in sess_path
+r = CK.save_instagram_session("Cookie: sessionid=SESS%3A42; csrftoken=CSRF; ds_user_id=42")
+assert r["ok"] and Path(sess_path).is_file(), r
+rows = [x for x in Path(sess_path).read_text().splitlines() if x and not x.startswith("#")]
+assert len(rows) == 3 and rows[0].split("\t")[5] == "sessionid", rows
+assert oct(os.stat(sess_path).st_mode)[-3:] == "600"
+assert str(settings.get("cookies_file") or "").endswith("instagram-cookies.txt"), settings.get("cookies_file")
+assert sess_path in " ".join(CK.gallery_flags()) and sess_path in " ".join(CK.ytdlp_flags())
+assert CK.count_netscape(sess_path) == 3
+print("✓ session: written as a 600 cookies.txt and used by gallery-dl AND yt-dlp")
+
+st = CK.instagram_session()
+assert st.get("instagram") and "instagram-cookies.txt" in (st.get("source") or ""), st
+print("✓ session: the status pill reports the imported session as the active source")
+
+bad = CK.save_instagram_session("nothing=1")
+assert bad["ok"] is False and "sessionid" in bad["message"], bad
+assert "sessionid" in Path(sess_path).read_text()      # a failed paste keeps the good one
+bad2 = CK.save_instagram_session("")
+assert bad2["ok"] is False
+print("✓ session: a paste without sessionid is refused and does not clobber the working one")
+
+# the login wall must NOT be reported as a broken cookie database
+assert not CK.is_cookie_error("Failed to load API data (KeyError: 'data')")
+assert not CK.is_cookie_error("Expecting value: line 1 column 1 (char 0)")
+assert CK.is_cookie_error("Unable to find Chrome cookies database in /x")
+assert CK.is_cookie_error("SecurityError: Failed to decrypt with DPAPI")
+wall = G.explain_error("Expecting value: line 1 column 1 (char 0)")
+assert "session" in wall.lower() and "cookie database" not in wall.lower(), wall
+print("✓ session: a login wall tells the user to paste a session, not to fix their cookie DB")
 
 reset()
 print("\nCOOKIE TESTS PASSED")

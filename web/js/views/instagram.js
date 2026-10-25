@@ -113,6 +113,10 @@
     }
     sel.addEventListener("change", () => { limit = Number(sel.value); savePrefs(); });
     row.append(sel);
+    row.append(el("button", {
+      class: "btn btn-ghost btn-sm ig-session-btn", type: "button", onclick: openSessionModal,
+      title: "Paste an Instagram login (sessionid) — the fix when the browser's cookie DB is locked",
+    }, el("span", { class: "btn-ico", html: ICONS.svg("shield") }), "Session"));
     row.append(sessionChip());
   }
 
@@ -235,6 +239,7 @@
       el("div", {},
         ...warnings.slice(0, 2).map((w) => el("div", {}, w)),
         el("div", { class: "ig-warn-actions" },
+          el("button", { class: "btn btn-primary btn-sm", onclick: openSessionModal }, "Use my session"),
           el("button", { class: "btn btn-ghost btn-sm", onclick: checkCookies }, "Check cookies"),
           el("button", { class: "btn btn-ghost btn-sm", onclick: applyBestCookies }, "Fix cookies"),
           el("button", { class: "btn btn-ghost btn-sm", onclick: () => window.App.showView("view-settings") }, "Open settings"))));
@@ -253,6 +258,53 @@
     } catch (e) {
       toast(String(e?.message || e), "err");
     }
+  }
+
+  /* The reliable path on Windows: Chrome's cookie DB cannot be read, so let the
+   * user paste the one cookie that matters and turn it into a cookies.txt. */
+  function openSessionModal() {
+    const area = el("textarea", {
+      class: "input ig-session-input", rows: "4", spellcheck: "false",
+      placeholder: "sessionid=5xxxxxxx%3Axxxx%3Axx…    (or the whole cookies.txt, or a `cookie:` line)",
+    });
+    const steps = el("div", { class: "ig-session-help" },
+      el("p", {}, "1. Open ", el("b", {}, "instagram.com"), " in your browser and sign in."),
+      el("p", {}, "2. Press ", el("b", {}, "F12"), " → Application (Chrome/Edge) or Storage (Firefox) → ",
+        el("b", {}, "Cookies"), " → https://www.instagram.com, then copy the value of ",
+        el("code", {}, "sessionid"), " — or right-click any instagram.com request → ",
+        el("b", {}, "Copy as cURL"), " and paste the whole cookie part."),
+      el("p", {}, "3. Paste it below. It is stored locally in ",
+        el("code", {}, "~/.avd/instagram-cookies.txt"), " and used by the checker instead of ",
+        "the browser database that Chrome keeps locked."));
+
+    const close = window.UI.modal({
+      title: "Instagram session",
+      body: el("div", { class: "ig-session-form" }, steps, area,
+        el("p", { class: "ig-hint" }, "Nothing is uploaded — the cookie goes to Instagram, ",
+          "the same place your browser sends it.")),
+      actions: [
+        { label: "Cancel" },
+        {
+          label: "Save & scan", primary: true, close: false,
+          onClick: async () => {
+            try {
+              const r = await window.API.cookiesSession(area.value.trim());
+              toast(r.message, r.ok ? "ok" : "warn",
+                { icon: r.ok ? "check" : "warning", ttl: r.ok ? 6000 : 12000 });
+              await refreshCookieState();
+              if (!r.ok) return;
+              close();
+              // no link typed yet → just put the caret where the work starts
+              if ($("#ig-url").value.trim()) startScan();
+              else $("#ig-url").focus();
+            } catch (e) {
+              toast(String(e?.message || e), "err");
+            }
+          },
+        },
+      ],
+    });
+    setTimeout(() => area.focus(), 60);
   }
 
   async function applyBestCookies() {
@@ -335,6 +387,7 @@
             "Set Settings → Video & capture → ", el("b", {}, "Browser cookies source"), " to the browser you are logged into Instagram with, close that browser completely, then scan again.",
             " If Chrome keeps answering “Could not copy Chrome cookie database”, export a cookies.txt instead (Settings → ", el("b", {}, "Cookies file"), ") — that source always reads."),
           el("div", { class: "ig-warn-actions", style: { marginTop: "4px" } },
+            el("button", { class: "btn btn-primary btn-sm", onclick: openSessionModal }, "Use my Instagram session"),
             el("button", { class: "btn btn-ghost btn-sm", onclick: checkCookies }, "Check my cookies"),
             el("button", { class: "btn btn-ghost btn-sm", onclick: () => window.App.showView("view-settings") }, "Open settings"))));
       }

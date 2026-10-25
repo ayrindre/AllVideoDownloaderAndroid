@@ -40,6 +40,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 import uuid
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -228,6 +229,15 @@ _ERROR_RE = re.compile(r"^\[[\w-]+\]\[(?:error|warning)\]\s*(.*)$")
 _EXC_RE = re.compile(r"^[A-Za-z_][\w.]*(?:Error|Exception|Warning):\s*(.+)$")
 _LOGIN_RE = re.compile(r"401|403|login|login_required|cookie|unauthori[sz]ed|not logged in|sessionid"
                        r"|checkpoint|challenge", re.I)
+# Instagram answers a logged-out API call with an HTML page where gallery-dl
+# expects JSON — the raw error is then "Expecting value: line 1 column 1".
+_WALL_RE = re.compile(r"failed to load api data|expecting value|jsondecode|json\.decoder"
+                      r"|unexpected token <?|not valid json|no json object could be decoded"
+                      r"|keyerror: 'data'|\('data'\)", re.I)
+# gallery-dl 1.32 raises UnboundLocalError ("page" is never bound) when the
+# profile page request fails — a 404 for a renamed account looks exactly like
+# this, so the message must not blame the network.
+_UNBOUND_RE = re.compile(r"cannot access local variable '?page'?|unboundlocal", re.I)
 _NET_RE = re.compile(r"name resolution|failed to resolve|connection|timed out|timeout|unreachable"
                      r"|newconnectionerror|proxy|ssl|temporary failure|network", re.I)
 _INTERNAL_RE = re.compile(
@@ -268,6 +278,17 @@ def explain_error(msg: str) -> str:
     low = text.lower()
     if cookie_state.is_cookie_error(text):
         return f"{text} — {cookie_state.EXPLAIN}"
+    if _UNBOUND_RE.search(low):
+        # the raw text is gallery-dl's own bug ("page" never bound) — it means
+        # nothing to a user, so this one replaces it instead of prefixing it
+        return ("Instagram served no profile page for that link — the username may not exist "
+                "(renamed or deleted), or Instagram answered with a login wall. Open the link "
+                "in your browser to check: if it opens there, use “Use my session” so the "
+                "checker has your Instagram cookies.")
+    if _WALL_RE.search(low):
+        return (f"{text} — Instagram answered with a web page instead of data, which is what it "
+                "does for a request that has no login. Use “Use my session” (or Settings → "
+                "Cookies file) to give the checker a real sessionid, then scan again.")
     if _MISSING_RE.search(low):
         return (f"{text} — Instagram only answers this for accounts it can see: it is the reply "
                 "for a typo/renamed handle, for a private account, and (most often) for a "
@@ -372,6 +393,44 @@ def _iter_messages(text: str):
             yield entry
 
 
+def _to_int(value) -> int:
+    """gallery-dl mixes types freely ('42', 42.0, None) — never trust them."""
+    if isinstance(value, bool) or value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(float(str(value).strip().replace(",", "")))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _to_ts(value) -> int:
+    """Unix timestamp from whatever gallery-dl put in ``date``.
+
+    ``-j`` writes datetimes through ``str()``, so a real dump carries
+    ``"date": "2026-09-21 14:13:20"`` (UTC) — NOT an integer. Coercing that with
+    int() used to abort the whole scan.
+    """
+    if value is None or value == "":
+        return 0
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return int(value)
+    text = str(value).strip()
+    if not text:
+        return 0
+    if re.fullmatch(r"\d+(\.\d+)?", text):
+        return int(float(text))
+    text = text.replace("T", " ").split("+")[0].split("Z")[0].strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d", "%Y/%m/%d %H:%M:%S"):
+        try:
+            return int(datetime.strptime(text[:len(fmt) + 4], fmt)
+                       .replace(tzinfo=timezone.utc).timestamp())
+        except ValueError:
+            continue
+    return 0
+
+
 def _ext_of(url: str, kw: dict) -> str:
     ext = str(kw.get("extension") or "").lower().lstrip(".")
     if ext:
@@ -396,17 +455,18 @@ def _item(kw: dict, url: str, target: str) -> dict | None:
         return None                      # gallery-dl placeholder (DASH muxing) — not a file
     ext = _ext_of(url, kw)
     kind = _kind_of(url, ext, kw)
-    user = str(kw.get("username") or kw.get("fullname") or "").strip()
+    owner = kw.get("user") if isinstance(kw.get("user"), dict) else {}
+    user = str(kw.get("username") or owner.get("username") or kw.get("fullname") or "").strip()
     code = str(kw.get("post_shortcode") or kw.get("sidecar_shortcode") or "").strip()
-    num = int(kw.get("num") or 0)
-    count = int(kw.get("count") or 0)
+    num = _to_int(kw.get("num"))
+    count = _to_int(kw.get("count"))
     media_id = str(kw.get("media_id") or "").strip()
     stem = "_".join(x for x in (user or "instagram", code or media_id or f"{num}") if x)
     if count > 1 and num:
         stem = f"{stem}_{num}"
     filename = re.sub(r"[^\w.\-]+", "_", f"{stem}.{ext}")[:150]
 
-    caption = str(kw.get("description") or "").strip().replace("\n", " ")
+    caption = str(kw.get("description") or kw.get("caption") or "").strip().replace("\n", " ")
     thumb = str(kw.get("display_url") or "")
     if thumb == url or thumb.startswith("ytdl:"):
         thumb = "" if kind == "video" else url
@@ -423,12 +483,12 @@ def _item(kw: dict, url: str, target: str) -> dict | None:
         "type": str(kw.get("type") or ("reel" if kind == "video" else "post")),
         "target": target,
         "username": user,
-        "fullname": str(kw.get("fullname") or ""),
+        "fullname": str(kw.get("fullname") or owner.get("full_name") or ""),
         "caption": caption[:240],
-        "date": int(kw.get("date") or kw.get("post_date") or 0),
-        "likes": int(kw.get("likes") or 0),
-        "width": int(kw.get("width") or 0),
-        "height": int(kw.get("height") or 0),
+        "date": _to_ts(kw.get("date") or kw.get("post_date")),
+        "likes": _to_int(kw.get("likes")),
+        "width": _to_int(kw.get("width") or kw.get("width_original")),
+        "height": _to_int(kw.get("height") or kw.get("height_original")),
     }
 
 
@@ -456,7 +516,11 @@ def parse_dump(text: str) -> dict:
             payload = msg[1] if len(msg) > 1 and isinstance(msg[1], dict) else {}
             errors.append(str(payload.get("message") or payload.get("error") or "gallery-dl error")[:300])
         elif head == _MSG_URL and len(msg) >= 3:
-            it = _item(msg[2], str(msg[1]), "")
+            try:
+                it = _item(msg[2] if isinstance(msg[2], dict) else {}, str(msg[1]), "")
+            except Exception as exc:  # noqa: BLE001 — one odd message ≠ dead scan
+                errors.append(f"skipped an unreadable item ({exc.__class__.__name__})")
+                it = None
             if it:
                 items.setdefault(it["id"], it)
         elif head == _MSG_DIR:
@@ -471,8 +535,8 @@ def parse_dump(text: str) -> dict:
                     "post_url": str(post.get("post_url") or ""),
                     "type": str(post.get("type") or "post"),
                     "caption": str(post.get("description") or "").replace("\n", " ")[:240],
-                    "date": int(post.get("date") or 0),
-                    "likes": int(post.get("likes") or 0),
+                    "date": _to_ts(post.get("date")),
+                    "likes": _to_int(post.get("likes")),
                     "username": str(post.get("username") or ""),
                     "fullname": str(post.get("fullname") or ""),
                 }
@@ -597,6 +661,10 @@ def start_scan(raw_source: str, *, include=None, limit: int = 0,
     except (TypeError, ValueError):
         limit = 30
     cookie_source = (cookie_source or settings.get("ytdlp_browser_cookies") or "").strip()
+    # A usable cookies.txt is what the run really uses (it beats the browser),
+    # so the snapshot must not keep naming a browser that is never read.
+    if cookie_state.file_usable():
+        cookie_source = "file"
 
     if source["kind"] == "profile":
         targets = [{"key": k, "label": TARGETS[k]["label"], "url": TARGETS[k]["url"].format(u=source["username"]),

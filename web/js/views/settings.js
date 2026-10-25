@@ -107,6 +107,21 @@
           "yt-dlp and gallery-dl use it — Instagram stories/highlights and gated videos start working. ",
           "It wins over the browser source above.")),
       el("div", { class: "field" },
+        el("label", { class: "f-label" }, "Instagram session (paste sessionid)"),
+        el("div", { class: "input-row" },
+          (() => {
+            const ta = el("textarea", { class: "input ig-session-input", rows: "2", spellcheck: "false",
+              placeholder: "sessionid=5xxxxxxx%3Axxxx%3A… · or a whole cookies.txt · or a cookie: line" });
+            ta.id = "set-ig-session";
+            return ta;
+          })(),
+          el("button", { class: "btn btn-ghost btn-sm", onclick: saveInstagramSession }, "Save session")),
+        el("p", { style: { fontSize: "11.5px", color: "var(--text-3)", marginTop: 7, lineHeight: 1.5 } },
+          "Chrome keeps its cookie database locked while it runs (and App-Bound-encrypts it on Windows), which is why ",
+          "the checker can come back empty. Open instagram.com → F12 → Application → Cookies → ",
+          "https://www.instagram.com, copy the ", el("b", {}, "sessionid"), " value and paste it here: it is written to ",
+          el("code", {}, "~/.avd/instagram-cookies.txt"), " and used by both engines — no extension, no export.")),
+      el("div", { class: "field" },
         el("label", { class: "f-label" }, "FFmpeg folder (optional)"),
         el("div", { class: "input-row" }, ffPath,
           el("button", { class: "btn btn-ghost btn-sm", onclick: async () => {
@@ -252,6 +267,18 @@
       }
       toast(r.message, r.ok ? "ok" : "warn", opts);
       S.meta = await window.API.meta();
+    } catch (e) {
+      toast(String(e?.message || e), "err");
+    }
+  }
+
+  async function saveInstagramSession() {
+    const ta = $("#set-ig-session");
+    if (!ta || !ta.value.trim()) return toast("Paste the sessionid value first.", "warn");
+    try {
+      const r = await window.API.cookiesSession(ta.value.trim());
+      toast(r.message, r.ok ? "ok" : "warn", { icon: r.ok ? "check" : "warning", ttl: r.ok ? 6000 : 12000 });
+      if (r.ok) { ta.value = ""; S.settings = await window.API.saveSettings({}); S.meta = await window.API.meta(); init(); }
     } catch (e) {
       toast(String(e?.message || e), "err");
     }

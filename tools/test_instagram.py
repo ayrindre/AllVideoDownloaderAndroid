@@ -211,8 +211,15 @@ assert any("Browser cookies source" in e for e in bad["errors"]), bad["errors"]
 print("✓ error: 401 mapped to the cookie-source fix (not a dead end)")
 
 # a raw gallery-dl crash (blocked connection, changed layout) gets an actionable wrap
-assert "gallery-dl could not read the page" in G.explain_error(
+# gallery-dl 1.32's own UnboundLocalError: the raw text means nothing to a user,
+# so it is replaced by "no profile page — check the name or add a session"
+_unbound = G.explain_error(
     "cannot access local variable 'page' where it is not associated with a value")
+assert "profile page" in _unbound and "session" in _unbound.lower(), _unbound
+assert "local variable" not in _unbound, "raw gallery-dl crash text must not reach the UI"
+# a logged-out API call gets an HTML page where gallery-dl wants JSON
+_wall = G.explain_error("Expecting value: line 1 column 1 (char 0)")
+assert "session" in _wall.lower() and "cookie database" not in _wall.lower(), _wall
 assert "Network proxy" in G.explain_error("Failed to resolve 'instagram.com'")
 assert "Browser cookies source" in G.explain_error("HttpError: '401 Unauthorized'")
 clean = G._friendly_stderr('Traceback (most recent call last):\n  File "x.py", line 3\n'
