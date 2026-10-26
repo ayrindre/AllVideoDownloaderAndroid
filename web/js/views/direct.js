@@ -88,6 +88,11 @@
     else if (d.kind === "direct") renderDirect(d);
     else if (d.kind === "magnet") renderMagnet(d);
     else renderPage(d);
+    if (d.access_note) {
+      const c = document.querySelector("#analyze-stage .analyze-card");
+      c?.prepend(el("div", { class: "notice warn", style: { marginBottom: "12px" } },
+        el("span", { html: ICONS.svg("warning") }), el("div", {}, d.access_note)));
+    }
     if (d.recovered_after_block) {
       const c = document.querySelector("#analyze-stage .analyze-card");
       c?.prepend(el("div", { class: "notice ok", style: { marginBottom: "12px" } },
@@ -292,7 +297,7 @@
   }
 
   function renderHls(d) {
-    const card = cardShell("STREAM · HLS/DASH", "#38bdf8");
+    const card = cardShell("STREAM · HLS/DASH" + (d.site ? ` · ${d.site}` : ""), "#38bdf8");
     const body = el("div", {});
     body.append(el("h2", { class: "ac-title", style: { marginBottom: 6 } }, d.title));
     const kv = el("div", {});

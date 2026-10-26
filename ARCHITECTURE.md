@@ -12,6 +12,13 @@ run.py ──▶ webfinder.app:create_app() ──▶ FastAPI ─┬─ /api/*  
 
 Resolution order, each stage proven and never guessed:
 
+0. **site adapter** (`core/adapters.py`) — for the handful of sites whose page is an
+   empty app shell and whose stream exists only behind a JSON endpoint: Aparat
+   (`/etc/api/video/videohash/<id>` → every CDN profile 144p…1080p with sizes) and
+   Filimo (`/api/fa/v1/partner/TV/watch/uid/<uid>` → the time-signed HLS manifest,
+   which stage 2 turns into a variant ladder). Adapters run **before** yt-dlp because
+   one request answers the whole question; a failing endpoint degrades silently to the
+   normal ladder, and paywalls/login walls become an `access_note` instead of an error.
 1. **magnet** → identified, copy-only (explained in UI).
 2. **`.m3u8`/`.mpd`** → `parse_m3u8_master` / `parse_mpd_master` build the variant
    ladder (height · bandwidth · rep-id) + ffprobe info → UI quality chips.
@@ -25,14 +32,28 @@ Resolution order, each stage proven and never guessed:
 5. **Silent URL** → HEAD/ranged-GET probe: content-type, then **magic bytes**
    (`ftyp`, EBML, `FLV`, RIFF/AVI, MPEG-PS) via `sniff_container`. Lying
    `octet-stream` servers can't hide an MP4.
-6. **Page** → `scan_page` (og:video, `<video>/<source>`, file anchors, index-of
-   listings with sizes, iframe players) **plus the player-config engine**:
-   `core/embed.py` de-escapes the document (`\/`, `\u002F`, `&amp;`) and mines
-   every media URL — `html5player.setVideoUrlHigh/Low/HLS`, kt_player
-   `video_url`/`_hd`/`_alt`, jwplayer `sources`, escaped JSON, `__NEXT_DATA__`,
-   JSON-LD — while `core/sites.py` labels the family and names the site. Ad
-   hosts, sprites and posters are scored out; tag-attribute URLs stay owned by
-   the anchor/video/og passes so a directory listing is never sold as
+6. **Page** → `scan_page` (og:video/twitter:player/schema.org, `<video>/<source>` and
+   every lazy `data-src|data-hls|data-mp4|data-video|…` spelling, file anchors incl.
+   `…mp4/?download=true`, index-of listings with sizes, iframe players) **plus the
+   player-config engine**: `core/embed.py` de-escapes the document (`\/`, `\u002F`,
+   `\u0022`, `&amp;`) and mines every media URL —
+   `html5player.setVideoUrlHigh/Low/HLS`, kt_player/KVS
+   `video_url`/`_hd`/`_alt_url*`, jwplayer, video.js, Plyr, Clappr, Flowplayer,
+   DPlayer, Shaka `manifestUri`, escaped JSON, `__NEXT_DATA__`, JSON-LD, meta/link/
+   attribute announcements — while `core/sites.py` labels the family and names the
+   site. Three deobfuscation layers run first, in this order:
+   * **KVS** — a `function/0/https://…/<32 chars>/clip.mp4` slot is permuted with the
+     page's `license_code`; the same reversible mapping yt-dlp uses is applied locally
+     (so the scrambled URL is never offered), and `video_url_text` becomes the label.
+   * **packed JS** — `eval(function(p,a,c,k,e,d)…)` payloads (Filemoon/StreamWish
+     family) are unpacked and re-scanned.
+   * **`atob("…")`** — base64 player configs are decoded.
+   * **percent-encoding** — `?u=https%3A%2F%2F…%2Fclip.mp4` params are unwrapped
+     (and only the inner absolute URL is kept, never the wrapper path).
+   Quality words sitting next to a URL (`{"file": …, "label": "1080p"}`,
+   `mediaDefinitions` `quality`) become the chip label; a label is only borrowed from
+   the same object. Ad hosts, sprites and posters are scored out; tag-attribute URLs
+   stay owned by the anchor/video/og passes so a directory listing is never sold as
    "qualities of one video".
 7. **`webmedia` card** — when the player config exposed ≥2 real files, the
    analyzer returns them as a quality ladder (manifests first, then tallest)
@@ -63,9 +84,15 @@ via `meta.variant_url` when yt-dlp is absent), file→`http`.
 
 `embed` is site-agnostic (any URL-shaped media in the document, ranked),
 `sites` is one declarative line per site (name + hostnames + player family +
-optional extraction patterns), `net` supplies browser-grade requests and the
-`curl_cffi` TLS-impersonation fallback. Adding a site never touches the
-analyzer; `GET /api/sites` and `tools/recipe_probe.py` expose the registry.
+optional extraction patterns + optional adapter), `adapters` holds the few
+API bridges that need code (Aparat, Filimo) as *pure parser + thin fetcher* pairs,
+`net` supplies browser-grade requests and the `curl_cffi` TLS-impersonation
+fallback. `sites.EMBED_HOSTS` recognises file hosts and cross-origin players by
+host, so an iframe whose URL says nothing useful still counts as a hop target —
+and a page's first candidates are walked (three deep) instead of dying with the
+first expired mirror. Adding a site never touches the analyzer;
+`GET /api/sites` and `tools/recipe_probe.py` expose the registry (the probe now
+also prints the matched adapter and embed host).
 
 ## Cookies — `core/cookies.py` (one policy, four call sites)
 
@@ -108,6 +135,29 @@ neither / failed ──► no flags (anonymous)
 (`engines`, `result_limit`, `safe_search`, `resolve_pages`, `demo_mode`) are stripped
 on load — a stale file can't resurrect the removed module. `PUT /api/settings` accepts
 only keys present in the snapshot.
+
+## Tests — `tools/`
+
+`test_video_core.py` (manifests, sniffing, picker ids, page loopback) and
+`test_coverage.py` (Aparat/Filimo payloads, KVS hash round-trip cross-checked
+against yt-dlp, player dialects, packed/atob obfuscation, embed hosts, registry
+uniqueness, adapter-outage fallback) are both offline and fixture-driven;
+`recipe_probe.py` is the live debugging entry point for a single URL.
+
+## Build — `build/` + `build.bat`
+
+`build/webfinder.spec` is the single PyInstaller recipe: `web/` is bundled as data,
+every `webfinder.*` module is a hidden import, yt-dlp's extractor tree is collected
+whole, and `build/icon.ico` is passed to `EXE(...)` so the packaged binary carries the
+app mark. That icon is **generated**, not stored art: `tools/make_icon.py` renders a
+1024 px master (violet→blue accent gradient + the sidebar's download arrow) and emits
+a ten-frame `.ico` (16 → 256 px, with a compact drawing below 32 px), plus `icon.png`
+for docs. `build.bat` regenerates it when missing and checks the finished EXE for an
+embedded icon; `build/installer.iss` reuses the same file for the setup wizard.
+
+`webfinder/config.py :: APP_VERSION` is the only place the version is written —
+`/api/meta` serves it to the sidebar badge, and `build/installer.iss` states the same
+number for the installer (`tools/test_app_surface.py` asserts the two never drift).
 
 ## Frontend — `web/`
 

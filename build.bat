@@ -10,6 +10,9 @@ rem  Works from a fresh copy: it creates .venv, installs the runtime + build
 rem  dependencies, and only then packages. Every step is checked - a failure
 rem  prints the reason instead of a Python traceback that scrolls away.
 rem  Full build log: build\build.log
+rem  The window/EXE icon comes from build\icon.ico; regenerate it any time with
+rem      .venv\Scripts\python tools\make_icon.py
+rem  (build.bat does that automatically when the file is missing).
 rem ==========================================================================
 setlocal EnableExtensions
 chcp 65001 >nul
@@ -90,6 +93,22 @@ if exist "%TEMP%\avd_pyinstaller.txt" set /p PI_VER=<"%TEMP%\avd_pyinstaller.txt
 if not defined PI_VER set "PI_VER=ok"
 echo        ok - PyInstaller %PI_VER%
 
+rem  the window/EXE icon is generated from tools\make_icon.py so it can be
+rem  rebuilt instead of shipping as an opaque blob. Pillow is build-time only.
+if exist "%ROOT%build\icon.ico" goto :icon_ok
+echo        drawing build\icon.ico (missing)...
+"%PY%" -c "import PIL" >nul 2>&1
+if not errorlevel 1 goto :draw_icon
+"%PY%" -m pip install --quiet pillow >nul 2>&1
+:draw_icon
+"%PY%" "%ROOT%tools\make_icon.py" >nul 2>&1
+if not exist "%ROOT%build\icon.ico" goto :no_icon
+echo        ok - icon generated
+goto :icon_ok
+:no_icon
+echo        [warn] no icon could be generated - the EXE will use the default one.
+:icon_ok
+
 rem ----------------------------------------------------------------- 3. clean
 echo  [3/5] Cleaning previous artifacts...
 tasklist /fi "imagename eq AllVideoDownloader.exe" 2>nul | find /i "AllVideoDownloader.exe" >nul
@@ -114,6 +133,16 @@ for %%F in ("%EXE%") do set "EXE_SIZE=%%~zF"
 if not defined EXE_SIZE goto :build_failed
 if %EXE_SIZE% LSS 5000000 goto :small_build
 echo        %EXE_SIZE% bytes
+
+rem  does the packaged EXE actually carry our icon? (silent warning, not fatal:
+rem  a machine without System.Drawing still gets a working build)
+if not exist "%ROOT%build\icon.ico" goto :icon_done
+where powershell >nul 2>&1
+if errorlevel 1 goto :icon_done
+powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $i=[System.Drawing.Icon]::ExtractAssociatedIcon('%EXE%'); if ($i) { exit 0 } else { exit 1 } } catch { exit 2 }" >nul 2>&1
+if errorlevel 1 echo        [warn] the EXE reports no embedded icon - rebuild after: .venv\Scripts\python tools\make_icon.py
+if not errorlevel 1 echo        icon: embedded
+:icon_done
 
 echo.
 echo  ==========================================================

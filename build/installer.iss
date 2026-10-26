@@ -3,12 +3,12 @@
 ;   1. build the EXE first:   build.bat
 ;   2. install Inno Setup 6:  winget install JRSoftware.InnoSetup
 ;   3. make the installer:    iscc build\installer.iss
-;      -> build\Output\AllVideoDownloader-Setup-2.0.0.exe
+;      -> build\Output\AllVideoDownloader-Setup-2.2.0.exe
 ;
 ; The EXE it packages is the one build.bat produces: ..\dist\AllVideoDownloader.exe
 
 #define AppName "All Video Downloader"
-#define AppVersion "2.0.0"
+#define AppVersion "2.2.0"
 #define AppExe "AllVideoDownloader.exe"
 #define AppPublisher "Behnam Ehsani"
 #define AppURL "https://github.com/wrappedman/AllVideoDownloader"
@@ -32,6 +32,7 @@ WizardStyle=modern
 ArchitecturesInstallIn64BitMode=x64compatible
 ArchitecturesAllowed=x64compatible
 SetupIconFile=icon.ico
+UninstallDisplayName={#AppName} {#AppVersion}
 UninstallDisplayIcon={app}\{#AppExe}
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog

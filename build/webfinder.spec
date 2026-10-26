@@ -41,7 +41,8 @@ hidden = [
     "yt_dlp", "yt_dlp.extractor", "yt_dlp.compat",
 ]
 binaries = []
-datas = [(web_dir, "web")]
+# the .ico is both the EXE resource and the runtime window icon (desktop/window.py)
+datas = [(web_dir, "web")] + ([(icon, ".")] if os.path.exists(icon) else [])
 
 # Dynamic importers: collect everything they can reach at runtime.
 try:

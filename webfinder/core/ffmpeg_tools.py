@@ -111,7 +111,7 @@ async def capture_stream(job, check_flags, publish) -> None:
     reencode = bool(job.meta.get("reencode"))
     args = [bins["ffmpeg"], "-hide_banner", "-nostdin", "-loglevel", "error",
             "-progress", "pipe:1", "-nostats", "-y",
-            "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AVD/2.0"]
+            "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AVD/2.2"]
     for k, v in headers.items():
         args += [f"-{k.lower()}", v]
     if job.meta.get("referer"):
