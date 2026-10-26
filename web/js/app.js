@@ -72,7 +72,7 @@
       setMaxIcon(typeof next === "boolean" ? next : !$("#btn-max").dataset.maxed);
     });
     $("#btn-close").onclick = () => exitApp();
-    $("#app-version").textContent = `v${S.meta?.version || "2.0"}`;
+    $("#app-version").textContent = `v${S.meta?.version || "2.2"}`;
     document.title = "All Video Downloader";
   }
   async function runDesktop(fn) { try { return await fn?.(); } catch { /* browser mode */ } }
@@ -148,7 +148,7 @@
       el("div", { class: "about-hero" },
         el("div", { class: "ah-ico", html: ICONS.svg("film") }),
         el("div", {},
-          el("h2", {}, "All Video Downloader", el("i", {}, `v${S.meta?.version || "2.0"}`)),
+          el("h2", {}, "All Video Downloader", el("i", {}, `v${S.meta?.version || "2.2"}`)),
           el("p", {}, "One job, done properly: every link that contains a video — any site, any container, any stream — becomes a file on your disk at the quality YOU picked."))),
       el("div", { class: "about-feats" },
         feat("zap", "Universal link engine", "yt-dlp's ~1,900 extractors, raw .mp4/.mkv files, HLS/DASH manifests, and pages that hide their video — deep-scanned and re-analyzed until a real stream is found."),

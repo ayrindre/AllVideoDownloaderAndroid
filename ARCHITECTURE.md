@@ -144,6 +144,21 @@ against yt-dlp, player dialects, packed/atob obfuscation, embed hosts, registry
 uniqueness, adapter-outage fallback) are both offline and fixture-driven;
 `recipe_probe.py` is the live debugging entry point for a single URL.
 
+## Build — `build/` + `build.bat`
+
+`build/webfinder.spec` is the single PyInstaller recipe: `web/` is bundled as data,
+every `webfinder.*` module is a hidden import, yt-dlp's extractor tree is collected
+whole, and `build/icon.ico` is passed to `EXE(...)` so the packaged binary carries the
+app mark. That icon is **generated**, not stored art: `tools/make_icon.py` renders a
+1024 px master (violet→blue accent gradient + the sidebar's download arrow) and emits
+a ten-frame `.ico` (16 → 256 px, with a compact drawing below 32 px), plus `icon.png`
+for docs. `build.bat` regenerates it when missing and checks the finished EXE for an
+embedded icon; `build/installer.iss` reuses the same file for the setup wizard.
+
+`webfinder/config.py :: APP_VERSION` is the only place the version is written —
+`/api/meta` serves it to the sidebar badge, and `build/installer.iss` states the same
+number for the installer (`tools/test_app_surface.py` asserts the two never drift).
+
 ## Frontend — `web/`
 
 Three views: **Grab a video** (analyze → quality chips → one button), **Downloads**

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 APP_NAME = "All Video Downloader"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.2.0"
 CONFIG_DIR = Path(os.environ.get("AVD_HOME") or os.environ.get("WEBFINDER_HOME")
                   or Path.home() / ".avd")
 CONFIG_FILE = CONFIG_DIR / "settings.json"

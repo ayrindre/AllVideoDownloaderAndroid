@@ -12,6 +12,33 @@ import time
 import urllib.request
 
 
+def icon_path() -> str | None:
+    """The app icon: bundled next to the EXE, else the repo's ``build/icon.ico``.
+
+    pywebview sets the *window* icon from this on Windows (otherwise it borrows
+    the running interpreter's icon, so a source checkout would show Python's),
+    on GTK and on Qt. Returning ``None`` simply keeps the platform default.
+    """
+    import sys
+    from pathlib import Path
+
+    here = Path(__file__).resolve()
+    candidates = []
+    bundle = getattr(sys, "_MEIPASS", None)          # PyInstaller onefile
+    if bundle:
+        candidates.append(Path(bundle) / "icon.ico")
+    candidates.append(here.parents[2] / "build" / "icon.ico")
+    if getattr(sys, "frozen", False):
+        candidates.append(Path(sys.executable).with_name("icon.ico"))
+    for path in candidates:
+        try:
+            if path.is_file():
+                return str(path)
+        except OSError:
+            continue
+    return None
+
+
 class DesktopBridge:
     """Methods reachable from JS as `window.pywebview.api.<name>`.
 
@@ -122,5 +149,5 @@ def launch(port: int, host: str) -> bool:
     bridge._window = window
     # 60fps, no resize flashing on Windows
     webview.settings["ALLOW_DOWNLOADS"] = True
-    webview.start(debug=False, gui="edgechromium")
+    webview.start(debug=False, gui="edgechromium", icon=icon_path())
     return True

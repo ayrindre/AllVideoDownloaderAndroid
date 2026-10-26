@@ -192,7 +192,31 @@ webfinder/
 tools/test_video_core.py    manifest ladders, sniffing, picker ids, page-rescan loopback
 tools/test_coverage.py      adapters, KVS hashing, player dialects, embed hosts, registry
 tools/test_desktop_contract.py
+build/
+├─ icon.ico                 window/EXE icon (generated, 16 → 256 px)
+├─ webfinder.spec           PyInstaller recipe (passes the icon to the EXE)
+└─ installer.iss            optional Inno Setup wrapper
 ```
+
+## Building the Windows EXE (v2.2)
+
+```bat
+build.bat                  :: -> dist\AllVideoDownloader.exe  (one file, no console)
+build.bat --run            :: ...and launch it afterwards
+iscc build\installer.iss   :: optional: build\Output\AllVideoDownloader-Setup-2.2.0.exe
+```
+
+The **icon is part of the build**, not an afterthought: `build/icon.ico` holds ten
+resolutions (16 → 256 px, the art from the sidebar brand), `webfinder.spec` hands it
+to PyInstaller so `AllVideoDownloader.exe` carries it in Explorer, the taskbar and the
+installer, and `build.bat` verifies it after packaging. Regenerate it at any time:
+
+```bash
+python tools/make_icon.py --preview     # rewrites build/icon.ico + icon.png
+```
+
+It is drawn by script (Pillow is a build-time dependency only), so the icon is
+reproducible instead of being an opaque binary blob.
 
 ## Tests
 

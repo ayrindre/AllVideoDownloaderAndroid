@@ -112,4 +112,40 @@ for mod in ("webfinder.core.cookies", "webfinder.core.downloader", "webfinder.co
 check("build.bat names the artifact it verifies",
       "AllVideoDownloader.exe" in (ROOT / "build.bat").read_text(encoding="utf-8", errors="ignore"))
 
+# ═══ 6. the EXE carries an icon, and the installer knows about it ══════════
+ico = ROOT / "build" / "icon.ico"
+check("build/icon.ico exists for the PyInstaller --icon step", ico.is_file())
+_blob = ico.read_bytes()
+check("it is a real multi-resolution .ico",
+      _blob[:4] == b"\x00\x00\x01\x00" and _blob[4] >= 5, f"{_blob[4]} frames")
+_sizes = sorted({_blob[6 + 16 * i] or 256 for i in range(_blob[4])})
+check("it scales from 16 px up to 256 px", _sizes[0] == 16 and _sizes[-1] == 256, str(_sizes))
+
+check("the spec passes the icon to EXE()", 'icon=icon if os.path.exists(icon)' in spec)
+check("the spec points at build/icon.ico", 'os.path.join(SPECPATH, "icon.ico")' in spec)
+_iss = (ROOT / "build" / "installer.iss").read_text(encoding="utf-8")
+check("the installer uses the same icon", "SetupIconFile=icon.ico" in _iss)
+check("the icon is reproducible, not a mystery blob", (ROOT / "tools" / "make_icon.py").is_file())
+check("build.bat regenerates a missing icon",
+      "tools\\make_icon.py" in (ROOT / "build.bat").read_text(encoding="utf-8", errors="ignore"))
+
+# ═══ 7. one version, stated once ═══════════════════════════════════════════
+import re as _re
+
+_cfg = (ROOT / "webfinder" / "config.py").read_text(encoding="utf-8")
+_ver = _re.search(r'APP_VERSION\s*=\s*"([^"]+)"', _cfg).group(1)
+check("the app version is 2.2.x", _ver.startswith("2.2"), _ver)
+check("the installer version matches config.py",
+      f'#define AppVersion "{_ver}"' in _iss, _ver)
+_index = (ROOT / "web" / "index.html").read_text(encoding="utf-8")
+check("the sidebar badge is not stale", 'id="app-version">v2.2<' in _index)
+
+# ═══ 8. the home page does not hard-sell two sites ═════════════════════════
+_direct = (ROOT / "web" / "js" / "views" / "direct.js").read_text(encoding="utf-8")
+_quick = _direct.split("const QUICK = [", 1)[1].split("];", 1)[0]
+check("no Aparat/Filimo quick-try chips on the home page",
+      "aparat" not in _quick.lower() and "filimo" not in _quick.lower(), _quick.strip()[:60])
+check("the quick-try row still offers generic examples",
+      _quick.count("{ label:") >= 3, f"{_quick.count('{ label:')} chips")
+
 print("\nAPP-SURFACE TESTS PASSED")

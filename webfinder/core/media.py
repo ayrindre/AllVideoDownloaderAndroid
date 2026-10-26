@@ -58,7 +58,7 @@ def ytcli_use_cli_block(err: str) -> bool:
     except Exception:  # noqa: BLE001 — never let classification break analysis
         return False
 
-UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36 AVD/2.0"
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36 AVD/2.2"
 
 
 def base_yt_opts(extra: dict | None = None) -> dict:
