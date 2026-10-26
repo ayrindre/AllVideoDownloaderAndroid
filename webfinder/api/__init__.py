@@ -196,10 +196,12 @@ async def sites_catalog():
 
     Data-driven by design — adding a site is one line in ``core/sites.py``.
     """
-    from ..core import net, sites
+    from ..core import adapters, net, sites
     return {"count": len(sites.RECIPES),
             "impersonation": net.has_impersonation(),
             "families": sorted(sites.FAMILIES),
+            "embed_hosts": [name for _, name in sites.EMBED_HOSTS],
+            "adapters": adapters.catalog(),
             "recipes": sites.catalog()}
 
 

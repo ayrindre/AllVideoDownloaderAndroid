@@ -31,6 +31,7 @@ hidden = [
     "webfinder", "webfinder.app", "webfinder.api", "webfinder.config",
     "webfinder.core", "webfinder.core.cookies", "webfinder.core.downloader",
     "webfinder.core.media", "webfinder.core.embed", "webfinder.core.sites",
+    "webfinder.core.adapters",
     "webfinder.core.net", "webfinder.core.filekind", "webfinder.core.ytcli",
     "webfinder.core.ffmpeg_tools", "webfinder.core.ffmpeg_setup",
     "webfinder.desktop", "webfinder.desktop.window",

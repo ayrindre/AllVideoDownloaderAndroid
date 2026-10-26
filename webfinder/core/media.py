@@ -33,6 +33,7 @@ from urllib.parse import urlparse, urljoin, unquote
 import httpx
 
 from ..config import settings
+from . import adapters
 from . import cookies as cookie_state
 from . import embed, filekind as fk, net
 from . import sites as sitelib
@@ -102,8 +103,11 @@ def _ie_for(url: str) -> str:  # cached: the registry walk is ~1800 checks the f
 def find_extractor(url: str) -> str:
     """Name of the yt-dlp extractor registered for this URL ('' = none)."""
     return _ie_for(url)
+_HREF_EXTS = (r"mp4|mkv|webm|m4v|avi|mov|mp3|flac|m4a|zip|rar|7z|gz|tar|exe|msi"
+              r"|iso|pdf|epub|torrent|m3u8|mpd|ts|m4s")
+# file hosts append "/?download=true" or "/?br=1243" after the real extension
 MEDIA_HREF_RE = re.compile(
-    r"""href=["']([^"']+?\.(?:mp4|mkv|webm|m4v|avi|mov|mp3|flac|m4a|zip|rar|7z|gz|tar|exe|msi|iso|pdf|epub|torrent|m3u8|mpd|ts))["']""",
+    rf"""href=["']([^"']+?\.(?:{_HREF_EXTS})(?:/[^"']*)?(?:\?[^"']*)?)["']""",
     re.I)
 
 
@@ -301,7 +305,7 @@ def _files_card(page_url: str, cands: list[dict], *, title: str = "", site: str 
     """
     vids = [c for c in cands
             if c.get("file_type") in ("video", "audio")
-            and (c.get("origin") or "") in _PLAYER_ORIGINS
+            and (c.get("origin") or c.get("source") or "") in _PLAYER_ORIGINS
             and not _PREVIEW_RE.search(c.get("url") or "")
             and c.get("quality") != "Preview"]
     vids = _same_video(vids)
@@ -335,7 +339,9 @@ async def _better_from_page(url: str, media: dict) -> dict | None:
     something taller, that is the honest answer — serve it as a card.
     """
     recipe = sitelib.recipe_for(url)
-    if not recipe or recipe.family not in ("html5player", "kt_player", "jwplayer"):
+    if not recipe or recipe.family not in (
+            "html5player", "kt_player", "jwplayer", "videojs", "plyr",
+            "clappr", "flowplayer", "dplayer", "shaka"):
         return None
     best = max((int(f.get("height") or 0) for f in media.get("formats") or []), default=0)
     if best >= 720:
@@ -359,6 +365,51 @@ async def _better_from_page(url: str, media: dict) -> dict | None:
     return card
 
 
+async def _adapter_card(url: str, _referer: str = "") -> dict | None:
+    """Ask a site's own API (Aparat, Filimo…) for the stream it publishes.
+
+    Some pages are empty JavaScript shells: no player config, no <video>, no
+    manifest — just an API call the app cannot guess. ``core/adapters.py`` knows
+    those few endpoints. Everything this returns is still a normal card, so the
+    rest of the app (quality chips, planner, workers) is unchanged.
+    """
+    card = await adapters.resolve(url)
+    if not card:
+        return None
+    site = card.get("site") or sitelib.site_name(url)
+    # an HLS answer: parse the manifest into a real variant ladder
+    if card.get("kind") == "hls" and not card.get("formats"):
+        stream = card.pop("stream", "") or card.get("url") or url
+        referer = card.get("referer") or _referer or url
+        try:
+            base = await _stream_result(stream, referer=referer)
+        except Exception:  # noqa: BLE001 — keep the card even if ffprobe/ffmpeg is absent
+            base = {"kind": "hls", "url": stream, "file_type": "video",
+                    "title": card.get("title") or fk.guess_filename(stream, "stream"),
+                    "formats": [{"height": 0, "label": "Best (auto)", "codecs": [],
+                                 "fps": 0, "format": "bv*+ba/b", "url": "", "size": None}],
+                    "single_stream": True}
+        merged = dict(base)
+        for key, value in card.items():
+            if key in ("kind", "url") or value in (None, "", [], {}):
+                continue
+            merged[key] = value
+        merged["kind"] = "hls"
+        merged["url"] = stream
+        merged["referer"] = referer
+        merged["found_on_page"] = card.get("found_on_page") or url
+        merged["formats_total"] = len(merged.get("formats") or [])
+        card = merged
+    card.setdefault("site", site)
+    if card.get("kind") == "webmedia":
+        card.setdefault("referer", _referer or url)
+        card.setdefault("found_on_page", url)
+        card.setdefault("formats_total", len(card.get("formats") or []))
+        card.setdefault("ffmpeg", find_ffmpeg()["available"])
+        card.setdefault("needs_ffmpeg_merge", not find_ffmpeg()["available"])
+    return card
+
+
 async def analyze(url: str, _depth: int = 0, _referer: str = "") -> dict:
     url = url.strip()
     if not re.match(r"^[a-z]+://", url, re.I) and not url.startswith("magnet:"):
@@ -372,8 +423,19 @@ async def analyze(url: str, _depth: int = 0, _referer: str = "") -> dict:
     if ext in fk.STREAM_EXTS:
         return await _stream_result(url, _referer)
 
+    # 0) Sites whose stream only exists behind a JSON endpoint (Aparat, Filimo):
+    #    ask their API first — it answers with the real ladder in one request,
+    #    whereas yt-dlp has no extractor for them (or a stale one).
+    site_card = await _adapter_card(url, _referer)
+    if site_card:
+        return site_card
+
     # 1) Try the yt-dlp extractor registry — this covers YouTube & friends.
-    media, yt_err = await _try_ytdlp(url)
+    #    A URL that already *is* a media file skips this: no extractor can say
+    #    anything better than the probe below, and yt-dlp would spend a request
+    #    downloading the file's first bytes just to hand back the same URL.
+    is_file = ext in fk.VIDEO_EXTS or ext in fk.AUDIO_EXTS
+    media, yt_err = (None, "") if is_file else await _try_ytdlp(url)
     if media and media.get("formats"):
         # Recognized platform answered — but a capped map is not the whole truth:
         # a named player family on the same page may expose a taller file.
@@ -559,23 +621,26 @@ async def analyze(url: str, _depth: int = 0, _referer: str = "") -> dict:
     if targets and _depth < 2:
         targets.sort(key=lambda c: (-int(c.get("size_bytes") or 0),
                                     0 if fk.url_extension(c["url"]) in fk.STREAM_EXTS else 1))
-        try:
-            yt_err_referrer["url"] = final
+        # A page can lie about its best candidate (expired mirror, ad iframe):
+        # walk the first few instead of dead-ending on one bad guess.
+        for target in targets[:3]:
             try:
-                sub = await analyze(targets[0]["url"], _depth + 1)
-            finally:
-                yt_err_referrer.clear()
+                yt_err_referrer["url"] = final
+                try:
+                    sub = await analyze(target["url"], _depth + 1)
+                finally:
+                    yt_err_referrer.clear()
+            except Exception:  # noqa: BLE001 — try the next candidate
+                continue
             if sub.get("kind") not in ("page", "magnet"):
                 sub["found_on_page"] = final
                 # most tube/CDN file links are hotlink-guarded: the download
                 # needs the hosting page as Referer to answer like the browser
                 sub["referer"] = final
-                rest = targets[1:12]
+                rest = [x for x in targets if x is not target][:11]
                 if rest:
                     sub["also_found"] = rest
                 return sub
-        except Exception:  # noqa: BLE001 — fall through to the plain page card
-            pass
     return {"kind": "page", "url": final, "title": page_info.get("title", ""),
             "site": page_info.get("site", ""), "size": size,
             "content_type": ctype, "candidates": candidates}
@@ -860,11 +925,15 @@ async def _try_ytdlp(url: str) -> tuple[dict | None, str]:
 # ---------------------------------------------------------------------------
 # Page scanning — crawl a result page for hidden direct file links
 # ---------------------------------------------------------------------------
-_OG_RE = re.compile('<meta[^>]+property=["\']og:(?:video|audio|image)(?::(?:secure_url|url))?["\'][^>]+content=["\']([^"\']+)["\']', re.I)
+_OG_RE = re.compile(
+    r"""<meta[^>]+(?:property|name|itemprop)=["'](?:og:(?:video|audio|image)(?::(?:secure_url|url))?"""
+    r"""|twitter:player:stream|contentUrl|video_src)["'][^>]+content=["']([^"']+)["']""", re.I)
 # <video src> / <source src> / lazily-loaded variants (data-src, data-video…)
-_VIDSRC_RE = re.compile('<(?:video|source)[^>]+(?:data-)?src=["\']([^"\']+)["\']', re.I)
+_VIDSRC_RE = re.compile(
+    r"""<(?:video|source|audio)[^>]+(?:data-(?:src|video|hls|dash|mp4|url|file|source|stream)"""
+    r"""|src)=["']([^"']+)["']""", re.I)
 
-_IFRAME_RE = re.compile('<iframe[^>]+src=["\']([^"\']+)["\']', re.I)
+_IFRAME_RE = re.compile('<iframe[^>]+(?:data-)?src=["\']([^"\']+)["\']', re.I)
 
 async def scan_page(url: str, limit: int = 12, wanted=None, referer: str = "",
                     info: dict | None = None) -> list[dict]:
@@ -930,14 +999,16 @@ async def scan_page(url: str, limit: int = 12, wanted=None, referer: str = "",
         src = urljoin(base, unescape_html(m.group(1)))
         if not src.startswith("http") or src in seen:
             continue
-        low = src.lower()
-        if not any(t in low for t in ("video", "embed", "player", "watch", "media", "/vid")):
+        if not sitelib.is_embed_url(src):
             continue
         seen.add(src)
         pr = _up(src)
+        player = sitelib.embed_host_for(src)
         out.append({"url": src,
-                    "filename": f"embed · {pr.netloc}{pr.path[:36]}",
-                    "file_type": "embed", "size_bytes": None, "origin": "embed"})
+                    "filename": f"{player + ' · ' if player else 'embed · '}"
+                                f"{pr.netloc}{pr.path[:36]}",
+                    "file_type": "embed", "size_bytes": None, "origin": "embed",
+                    "player": player, "site": player})
 
     # ── player configs / escaped JSON / recipe families ────────────────────
     # (inserted before the plain anchors so a 12-result page full of links

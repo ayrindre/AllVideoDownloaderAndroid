@@ -26,11 +26,28 @@ any OS  → python run.py --no-open   (browser mode at http://127.0.0.1:8765)
 | Playlist / channel / tube-gallery pages | Extracted flat (`in_playlist`): the **first entry** becomes the fully-analyzed card, the next 24 ride along under *"More from this playlist"* with per-entry Analyze / Download / Copy. Nothing gets silently truncated to one video. |
 | A page that *plays* a video | Deep-scan: `og:video`, `<video>/<source>`, file anchors, Apache *index-of* listings (with sizes) — and when a video URL surfaces, the app **re-analyzes that URL** one level deep and hands you its real card, not a candidate list. |
 | A page whose video lives in its **player config** — XVideos, XNXX, xHamster, TXXX, SpankBang, kt_player tubes, jwplayer/video.js, `__NEXT_DATA__`, JSON-LD | The document is de-escaped (`\/`, `\u002F`, `&amp;`) and mined for every media URL: `html5player.setVideoUrlHigh/Low/HLS`, `video_url` / `video_url_hd`, `sources:[{file:…}]`, escaped JSON, manifests. Ads, sprites and posters are scored out; the real files become **quality chips** (1080p / 720p / HLS), and the hosting page rides along as `Referer`. |
+| A page that only exists as a **JavaScript app** — Aparat, Filimo | Those two publish their stream through an API, not in the HTML. A tiny per-site *adapter* asks that API directly: Aparat returns its whole CDN ladder (144p→1080p, with real file sizes); Filimo returns the signed HLS manifest, which is parsed into 1080p/720p/480p chips. Paywalls and login walls are stated in plain words instead of hiding behind a generic error. |
+| An adult tube built on **KVS/kt_player** — 1porn.tv, PornTrex, JAVHD, TXXX… | KVS hides each file behind a permuted `get_file` path (`function/0/https://…/<hash>/clip_720p.mp4`). The permutation is derived from the page's `license_code`, and the app now reverses it locally (verified against yt-dlp's own decoder on random license/hash pairs), so the *real* 1080p/720p/480p URLs become chips — plus `video_url_text` labels, `get_file` download anchors and the `…mp4/?download=true` form. |
 | A magnet | Honestly identified; copy it to your torrent client. (This app doesn't fake P2P.) |
 
 Pages whose only video surface is a **cross-origin `<iframe>` player** are not dead
 ends either: the scan records every player-looking iframe as an `embed` candidate and
-the analyzer **hops into the best one** (files first, embeds second) before giving up.
+the analyzer **hops into the best one** (files first, embeds second) — and now tries up
+to three candidates instead of dying with the first expired mirror. File hosts and
+multi-source front-ends are recognised by host, even when the URL says nothing:
+StreamTape, DoodStream, MixDrop, FileMoon, StreamWish/StreamHide, VOE, Vidmoly,
+MP4Upload, SendVid, UpStream, VidSrc, 2Embed, embed.su, SmashyStream, SuperEmbed,
+MultiEmbed, plus YouTube/Vimeo/Dailymotion/OK.ru/VK/Rutube/Twitch/Kick/Facebook/
+Instagram/TikTok/Bilibili/Aparat/Filimo player URLs.
+
+Obfuscation is handled in-place, without a JavaScript engine: Dean-Edwards packed
+scripts (`eval(function(p,a,c,k,e,d)…)`, the Filemoon/StreamWish family) are unpacked
+and re-scanned, `atob("…")` base64 configs are decoded, percent-encoded stream URLs
+(`?u=https%3A%2F%2F…%2Fclip.mp4`) are unwrapped, and the player dialects of
+**video.js, Plyr, Clappr, Flowplayer, DPlayer, Shaka, jwplayer** — in either key order —
+feed the same candidate pipeline as `html5player` and KVS. Quality words stored *next
+to* a URL (`{"file": "…", "label": "1080p"}`, Pornhub's `mediaDefinitions` `quality`)
+become the chip label, and a label from a neighbouring entry is never borrowed.
 
 ## When the extractor refuses — or lies about quality
 
@@ -55,12 +72,18 @@ for it:
 * **Unknown sites** → the same generic engine runs on *every* page. No site is
   "unsupported"; at worst it is unnamed.
 
-Built-in recipes (`webfinder/core/sites.py`, ~75 sites, `GET /api/sites` lists them):
-tube sites (XVideos, XNXX, xHamster, TXXX, SpankBang, Pornhub, RedTube, YouPorn,
-Eporner, HQPorner, PornTrex, ThisVid, DrTuber, TNAFlix, JavHD, MissAV, Hanime…),
-mainstream (YouTube, Vimeo, Dailymotion, OK.ru, VK, Rumble, BitChute, Odysee,
-Twitch/Kick, X, Reddit, TikTok, Instagram, Facebook, Bilibili, Douyin, Youku, Weibo…)
-and Persian (Aparat, Namasha, Tamasha, Dideo, Telewebion, Varzesh3, FilmNet, Shad).
+Built-in recipes (`webfinder/core/sites.py` — **384 sites / 717 hostnames**,
+`GET /api/sites` lists them, domain-matched including subdomains): adult tube sites and
+networks (XVideos, XNXX, xHamster, Pornhub, RedTube, YouPorn, Tube8, TXXX, SpankBang,
+Eporner, HQPorner, PornTrex, ThisVid, DrTuber, TNAFlix, JavHD, MissAV, Hanime, 1Porn,
+AnyPorn, Vjav, Japan/Asian tubes, Gay/trans/hentai tubes…), file hosts and multi-source
+embeds (StreamTape, DoodStream, MixDrop, FileMoon, StreamWish, VOE, VidSrc, 2Embed,
+MEGA, Google Drive, Dropbox, Pixeldrain…), mainstream platforms (YouTube, Vimeo,
+Dailymotion, OK.ru, VK, Rutube, Rumble, BitChute, Odysee, Twitch/Kick, X, Reddit,
+TikTok, Instagram, Facebook, Bilibili, Douyin, Youku, iQIYI, Weibo, Niconico…), the
+world's broadcasters (BBC, ITV, ZDF, ARD, France.tv, RAI, SVT, NRK, CBC, ABC/9Now,
+Globoplay, Telemundo…) and Persian platforms (Aparat, Filimo, Namava, Namasha, Tamasha,
+Dideo, Telewebion, Varzesh3, FilmNet, Shad…).
 
 ### Adding a site without touching the engine
 
@@ -68,6 +91,21 @@ and Persian (Aparat, Namasha, Tamasha, Dideo, Telewebion, Varzesh3, FilmNet, Sha
 # webfinder/core/sites.py
 _r("mynewtube", "MyNewTube", ("mynewtube.com", "mynewtube.net"), "kt_player")
 ```
+
+When a site's stream is **not in the HTML at all** (the page is an empty app shell),
+add an API bridge — that is what `webfinder/core/adapters.py` is for, and it is still
+only two lines plus a parser:
+
+```python
+# webfinder/core/sites.py
+_r("mysite", "MySite", ("mysite.com",), "generic", adapter="mysite")
+```
+
+Aparat and Filimo ship that way: a regex for the site's URL shapes, one JSON endpoint,
+a parser that returns the ordinary card the analyzer already renders (and optional
+`access_note` for paywalls / login walls). An adapter that cannot reach its API is
+skipped silently, so a dead endpoint degrades to yt-dlp + the page scan instead of
+breaking the link.
 
 `generic` is the default and usually needs nothing else: any media URL in the HTML —
 plain, escaped, inside JSON, inside a `<video>` tag — is already found. Pick a family
@@ -140,8 +178,9 @@ webfinder/
 ├─ core/
 │  ├─ media.py              THE brain: sniff → ladder → yt-dlp matrix → plan_download
 │  ├─ cookies.py            cookies.txt vs browser source, failure memory, probe
-│  ├─ embed.py              de-escape + mine media URLs from player configs/JSON
-│  ├─ sites.py              declarative recipe table (~75 sites) + player families
+│  ├─ embed.py              de-escape + mine media URLs (KVS, packed JS, atob, players)
+│  ├─ sites.py              declarative recipe table (384 sites) + player families
+│  ├─ adapters.py           API bridges for API-only sites (Aparat, Filimo)
 │  ├─ net.py                browser headers, bot-wall detection, TLS impersonation
 │  ├─ ytcli.py              system-yt-dlp bridge (cookies, impersonation, progress)
 │  ├─ filekind.py           URL→file-type taxonomy (the search-less descendant of dorks)
@@ -151,6 +190,7 @@ webfinder/
 ├─ desktop/                 pywebview shell + js bridge
 └─ web/                     frontend (Direct · Downloads · Settings)
 tools/test_video_core.py    manifest ladders, sniffing, picker ids, page-rescan loopback
+tools/test_coverage.py      adapters, KVS hashing, player dialects, embed hosts, registry
 tools/test_desktop_contract.py
 ```
 
@@ -158,10 +198,19 @@ tools/test_desktop_contract.py
 
 ```bash
 python tools/test_video_core.py           # fixture-tested engine (no network)
+python tools/test_coverage.py             # adapters, KVS, players, embeds, registry
 python tools/test_desktop_contract.py     # pywebview bridge hygiene
 python tools/test_cookies.py              # cookie source: file vs browser, failure memory
 python tools/recipe_probe.py <url>        # which recipe matches, what it finds (needs network)
 ```
+
+`test_coverage.py` pins the *new* breadth offline against real-shaped payloads: the
+Aparat videohash JSON (six profiles with Persian size strings), Filimo's TV-partner
+JSON (signed manifest → variant chips), a KVS page whose `function/0/` hash is
+constructed the same way the CDN builds it (and cross-checked against yt-dlp's decoder),
+jwplayer/video.js/Plyr/Clappr/Flowplayer/DPlayer/Shaka configs, a packed script, an
+`atob` config, embed-host iframes, the full registry (unique keys/domains) and the
+"API is down → fall back to the extractor" guarantee.
 
 `test_video_core.py` covers the player-config engine with real-world-shaped
 fixtures: `html5player.setVideoUrlHigh/Low/HLS`, kt_player `video_url`/`_hd`,

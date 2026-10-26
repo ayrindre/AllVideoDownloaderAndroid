@@ -23,8 +23,13 @@ MAGNET_RE = re.compile(r"^magnet:\?|xt=urn:btih", re.I)
 
 
 def url_extension(url: str) -> str:
+    """Last path extension, tolerating file-host decorative suffixes.
+
+    ``/get_file/9/<hash>/…/clip_720m.mp4/?download=true`` is still an mp4 — the
+    trailing slash and query are KVS/hotlink-guard noise, not part of the name.
+    """
     try:
-        path = unquote(urlparse(url).path)
+        path = unquote(urlparse(url).path).rstrip("/;")
     except ValueError:
         return ""
     m = re.search(r"(\.[A-Za-z0-9]{1,6})$", path)

@@ -30,7 +30,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from webfinder.core import embed, net, sites  # noqa: E402
+from webfinder.core import adapters, embed, net, sites  # noqa: E402
 
 
 async def _load(url: str, from_file: bool, base: str) -> tuple[str, str]:
@@ -63,6 +63,7 @@ def main() -> int:
 
     recipe = sites.recipe_for(base)
     family = sites.detect_family(text)
+    adapter_hit = adapters.for_url(base)
     meta = embed.page_meta(text, base)
     cands = sites.candidates(text, base, limit=args.limit)
 
@@ -70,6 +71,8 @@ def main() -> int:
         "url": base,
         "site": recipe.name if recipe else "",
         "recipe": recipe.key if recipe else "",
+        "adapter": adapter_hit[0].key if adapter_hit else "",
+        "embed_host": sites.embed_host_for(base),
         "player_family": family or (recipe.family if recipe else "generic"),
         "title": meta["title"],
         "thumbnail": meta["thumbnail"],
@@ -91,6 +94,8 @@ def main() -> int:
             "referer": card.get("referer"),
             "formats": [{k: f.get(k) for k in ("label", "height", "ext", "url")}
                         for f in card.get("formats") or []],
+            "access_note": card.get("access_note"),
+            "adapter": card.get("adapter"),
             "recovered_after_block": card.get("recovered_after_block"),
             "upgraded_from_extractor": card.get("upgraded_from_extractor"),
             "error": card.get("error"),
@@ -103,6 +108,10 @@ def main() -> int:
     print(f"URL        {report['url']}")
     print(f"Site       {report['site'] or '— (not in the recipe list; generic engine)'}")
     print(f"Recipe     {report['recipe'] or '—'}")
+    if report["adapter"]:
+        print(f"Adapter    {report['adapter']} (site API — resolved before yt-dlp)")
+    if report["embed_host"]:
+        print(f"Embed      {report['embed_host']} player")
     print(f"Player     {report['player_family'] or 'unknown'}")
     print(f"Title      {report['title'] or '—'}")
     print(f"Impersonate{'yes (curl_cffi)' if report['tls_impersonation'] else 'no  (pip install curl_cffi)'}")
@@ -122,7 +131,8 @@ def main() -> int:
             print(f"  title    {a['title']}")
         for f in a.get("formats") or []:
             print(f"  chip     {f.get('label') or f.get('height')}  {f.get('url')}")
-        for key in ("recovered_after_block", "upgraded_from_extractor", "error"):
+        for key in ("access_note", "recovered_after_block", "upgraded_from_extractor",
+                    "error"):
             if a.get(key):
                 print(f"  {key:23} {a[key]}")
     return 0
