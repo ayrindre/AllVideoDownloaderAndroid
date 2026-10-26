@@ -82,7 +82,12 @@ if errorlevel 1 goto :no_pyinstaller
 :have_pyinstaller
 "%PY%" -c "import fastapi, uvicorn, yt_dlp" >nul 2>&1
 if errorlevel 1 goto :no_core
-for /f "delims=" %%V in ('"%PY%" -m PyInstaller --version 2^>nul') do set "PI_VER=%%V"
+rem  capture through a file: `for /f` around a quoted path with spaces is a
+rem  classic cmd.exe quoting trap
+"%PY%" -m PyInstaller --version > "%TEMP%\avd_pyinstaller.txt" 2>nul
+set "PI_VER="
+if exist "%TEMP%\avd_pyinstaller.txt" set /p PI_VER=<"%TEMP%\avd_pyinstaller.txt"
+if not defined PI_VER set "PI_VER=ok"
 echo        ok - PyInstaller %PI_VER%
 
 rem ----------------------------------------------------------------- 3. clean
