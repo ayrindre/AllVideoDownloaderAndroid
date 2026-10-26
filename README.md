@@ -32,59 +32,6 @@ Pages whose only video surface is a **cross-origin `<iframe>` player** are not d
 ends either: the scan records every player-looking iframe as an `embed` candidate and
 the analyzer **hops into the best one** (files first, embeds second) before giving up.
 
-## Instagram checker — profile → every media file it exposes
-
-The second tab answers a different question than the link box: not "download *this*
-video" but "what does *this account* publish?". Paste a profile link or an `@handle`
-and **gallery-dl** walks it — one run per tab, so a private "tagged" section can
-never hide the results of "posts":
-
-| Tab | What it lists |
-|---|---|
-| Posts | everything on the grid (carousels included, each child separately) |
-| Reels | the vertical video tab |
-| Stories | only with a logged-in session, and only what is live right now |
-| Highlights | saved story collections |
-| Tagged | posts the account is tagged in |
-
-The scan is a **task, not a request**: `POST /api/gallery/scan` returns an id
-immediately, the UI polls `GET /api/gallery/scan/{id}`, and results appear tab by
-tab while Instagram's rate limiter sleeps between pages. Every file becomes a
-selectable card (thumbnail, video/photo badge, caption, date). Selected items are
-handed to the **normal Download Manager** (`kind: http`, page as `Referer`), so
-pause/resume/progress/retry behave exactly like every other transfer.
-
-Details that matter in practice:
-
-- **Progressive video, not silent DASH.** gallery-dl is told
-  `extractor.instagram.videos=merged` (Instagram's DASH variant is higher quality
-  but carries no audio) and `audio=false`/`previews=false`, so every listed video
-  is the audio-muxed file you actually want.
-- **Post depth per tab** (Settings → Instagram checker, default 30) via
-  `--post-range`, plus an optional request delay — Instagram logs out clients that
-  hammer it, and `stories`/`highlights`/18+ content always need the session.
-- **Same cookie source as yt-dlp.** Settings → Video & capture → *Browser cookies
-  source* (or a `cookies.txt` file, which wins) is handed to
-  `--cookies-from-browser` / `--cookies`, which is the difference between
-  "nothing found" and a full profile.
-- **Honest failures.** A 401 becomes "set the cookie source", a DNS/proxy failure
-  says so, and a gallery-dl traceback is trimmed to one readable line with the fix
-  (usually `pip install -U gallery-dl`) instead of a Python stack.
-- **Not Instagram-only.** Any URL gallery-dl supports (a Reddit profile, a
-  DeviantArt gallery, a Pinterest board…) goes through the same scan path; the tab
-  is named for the job most people want.
-
-```bash
-pip install gallery-dl          # required for this tab (run.bat installs it too)
-# optional: point the app at a specific binary (a path OR a full command line)
-AVD_GALLERYDL_BIN="/usr/local/bin/gallery-dl"  python run.py
-```
-
-Endpoints: `GET /api/gallery/engine` (availability/version/tabs),
-`POST /api/gallery/scan`, `GET /api/gallery/scan/{id}`,
-`GET /api/gallery/scans`, `POST /api/gallery/scan/{id}/cancel`,
-`POST /api/gallery/download`.
-
 ## When the extractor refuses — or lies about quality
 
 A tube site is three moving parts: the page, the player config embedded in it, and
@@ -159,14 +106,13 @@ Two causes, both handled structurally now:
    cannot become readable twice, so the app stops re-reading it (that is what
    used to print the same `ERROR:` line for every single request) and goes
    straight to the anonymous path instead. **Settings → Video & capture →
-   *Cookies file*** takes precedence over the browser for both engines — an
+   *Cookies file*** takes precedence over the browser for every engine — an
    exported `cookies.txt` always reads — and the **Check cookies** button reads
    the configured source locally (no network) to say exactly what is broken.
    When the chosen browser cannot be read, the app **switches to another browser
    on the same machine whose database does read** (Firefox never locks its own),
-   says so, and *Fix cookies* makes that permanent in one click. If the cookies
-   read fine but hold no Instagram login, the tab says exactly that instead of
-   showing an empty grid. A refused extractor is also no longer a dead end: the page
+   says so, and *Fix cookies* makes that permanent in one click. A refused
+   extractor is also no longer a dead end: the page
    gets scanned and if it links a `master.m3u8`/mp4, **that** becomes the card —
    quality ladder included, hosting page attached as Referer, with a green
    "recovered after block" note.
@@ -193,7 +139,6 @@ webfinder/
 ├─ config.py                ~/.avd/settings.json (+ one-shot migration)
 ├─ core/
 │  ├─ media.py              THE brain: sniff → ladder → yt-dlp matrix → plan_download
-│  ├─ gallery.py            gallery-dl bridge: profile walk → JSON → selectable items
 │  ├─ cookies.py            cookies.txt vs browser source, failure memory, probe
 │  ├─ embed.py              de-escape + mine media URLs from player configs/JSON
 │  ├─ sites.py              declarative recipe table (~75 sites) + player families
@@ -214,7 +159,6 @@ tools/test_desktop_contract.py
 ```bash
 python tools/test_video_core.py           # fixture-tested engine (no network)
 python tools/test_desktop_contract.py     # pywebview bridge hygiene
-python tools/test_instagram.py            # Instagram checker: gallery-dl bridge + routes (offline)
 python tools/test_cookies.py              # cookie source: file vs browser, failure memory
 python tools/recipe_probe.py <url>        # which recipe matches, what it finds (needs network)
 ```

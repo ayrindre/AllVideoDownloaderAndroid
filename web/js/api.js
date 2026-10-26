@@ -33,17 +33,10 @@
     scan: (url) => req("POST", "/api/scan", { url }),
     selfupdate: () => req("POST", "/api/system/selfupdate"),
 
-    /* ── Instagram checker (gallery-dl) ─────────────────────────────────── */
+    /* ── cookies (used by the download engine) ──────────────────────────── */
     cookiesStatus: () => req("GET", "/api/cookies/status"),
     cookiesProbe: () => req("GET", "/api/cookies/probe"),
     cookiesUseBest: () => req("POST", "/api/cookies/use-best"),
-    cookiesSession: (value) => req("POST", "/api/cookies/instagram-session", { value }),
-    galleryEngine: () => req("GET", "/api/gallery/engine"),
-    galleryScan: (payload) => req("POST", "/api/gallery/scan", payload),
-    galleryScanStatus: (id) => req("GET", `/api/gallery/scan/${id}`),
-    galleryScans: () => req("GET", "/api/gallery/scans"),
-    galleryScanCancel: (id) => req("POST", `/api/gallery/scan/${id}/cancel`),
-    galleryDownload: (items) => req("POST", "/api/gallery/download", { items }),
   };
 
   /* ── desktop bridge: window controls & native dialogs via pywebview ──── */

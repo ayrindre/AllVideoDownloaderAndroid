@@ -6,7 +6,7 @@ Two sources, in this order:
    the reliable path: a browser can keep its database locked or App-Bound
    encrypted (Chrome 127+ on Windows, yt-dlp issue #7271), while an exported
    Netscape cookie file always reads.
-2. **A browser profile** (chrome/edge/firefox/…), read by yt-dlp and gallery-dl.
+2. **A browser profile** (chrome/edge/firefox/…), read by yt-dlp.
 
 A browser read that fails once is remembered for the whole session. That matters:
 the failure mode is "the file is locked", which repeats identically for every
@@ -16,17 +16,16 @@ straight to the anonymous path and tell the user exactly what to fix.
 """
 from __future__ import annotations
 
-import os
 import re
 import threading
-import time
 from pathlib import Path
 
-from ..config import CONFIG_DIR, settings
+from ..config import settings
 
 # yt-dlp / gallery-dl / our own wording for "the cookie source did not work"
+# (the gallery-dl pattern stays: it is the same locked-cookie-DB disease)
 _COOKIE_ERR = re.compile(
-    # the classic ones (yt-dlp + gallery-dl wording)
+    # the classic ones
     r"could not copy|cookie database|app[- ]bound|permission denied.*cookie"
     r"|cookie.*(?:locked|in use)"
     # gallery-dl: "Unable to find Chrome cookies database in …"
@@ -55,7 +54,6 @@ _lock = threading.Lock()
 _browser_failure = ""          # first failure message in this process
 _alt_browser = None            # None = not scanned yet; "" = nothing readable
 _alt_meta: dict = {}
-_ig_cache: dict = {}           # source signature → does it hold an Instagram login?
 
 
 # ---------------------------------------------------------------------------
@@ -131,7 +129,6 @@ def reset() -> None:
         _browser_failure = ""
         _alt_browser = None
         _alt_meta.clear()
-        _ig_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -139,14 +136,6 @@ def reset() -> None:
 # ---------------------------------------------------------------------------
 def ytdlp_flags() -> list[str]:
     """Extra CLI flags for the system yt-dlp binary."""
-    if file_usable():
-        return ["--cookies", cookie_file()]
-    name = active_browser()
-    return ["--cookies-from-browser", name] if name else []
-
-
-def gallery_flags() -> list[str]:
-    """Extra CLI flags for gallery-dl."""
     if file_usable():
         return ["--cookies", cookie_file()]
     name = active_browser()
@@ -192,103 +181,6 @@ def used_source() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Instagram session import — paste a cookie, get a cookies.txt
-# ---------------------------------------------------------------------------
-IG_DOMAIN = ".instagram.com"
-IG_NAMES = ("sessionid", "csrftoken", "ds_user_id", "mid", "datr", "ig_did", "rur")
-_PAIR_RE = re.compile(r"([A-Za-z0-9_\-]+)=([^;,\s]+)")
-
-
-def instagram_cookie_path() -> str:
-    """Where an imported session lives (next to settings.json, not in a temp dir)."""
-    return str(Path(CONFIG_DIR) / "instagram-cookies.txt")
-
-
-def parse_cookie_input(raw: str) -> dict:
-    """Understand everything a user might paste into a "session" box.
-
-    Accepted: the bare `sessionid` value, `a=1; b=2`, a `Cookie:` header line, a
-    JSON `{"sessionid": ...}` blob, or the whole content of a Netscape
-    `cookies.txt`. Returns `{"cookies": {...}}` or `{"cookiestxt": "<text>"}`.
-    """
-    text = (raw or "").strip().strip('"\'')
-    if not text:
-        return {}
-    # a cookies.txt (tab separated, ≥7 columns) is passed through untouched
-    if any(line.count("\t") >= 6 for line in text.splitlines()):
-        return {"cookiestxt": text, "cookies": {}}
-    if text[0] in "{[":
-        try:
-            import json
-            data = json.loads(text)
-            items = data if isinstance(data, list) else [
-                {"name": k, "value": v} for k, v in data.items()]
-            cookies = {}
-            for entry in items:
-                if isinstance(entry, dict) and entry.get("name"):
-                    cookies[str(entry["name"])] = str(entry.get("value") or "")
-            if cookies:
-                return {"cookies": cookies}
-        except Exception:  # noqa: BLE001 — not JSON, keep going
-            pass
-    text = re.sub(r"^\s*cookie\s*:\s*", "", text, flags=re.I)
-    if "=" not in text:
-        # a bare value: sessionid is the only one this makes sense for
-        return {"cookies": {"sessionid": text}} if len(text) > 12 else {}
-    pairs = dict(_PAIR_RE.findall(text))
-    known = {k: v for k, v in pairs.items() if k in IG_NAMES}
-    # keep the unknown names too when nothing useful was recognised, so the error
-    # can say "there is no sessionid here" instead of "nothing usable"
-    return {"cookies": known or pairs} if pairs else {}
-
-
-def save_instagram_session(raw: str) -> dict:
-    """Store the pasted session as a cookies.txt the engines already understand."""
-    parsed = parse_cookie_input(raw)
-    if not parsed:
-        return {"ok": False, "message": ("Nothing usable in that paste — it should contain "
-                                         "sessionid=… (or the whole cookies.txt content).")}
-
-    path = Path(instagram_cookie_path())
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    if parsed.get("cookiestxt"):
-        text = parsed["cookiestxt"]
-        path.write_text(text if text.endswith("\n") else text + "\n", encoding="utf-8")
-        count = count_netscape(str(path))
-        if not count:
-            path.unlink(missing_ok=True)
-            return {"ok": False, "message": "That cookies.txt has no cookie rows in it."}
-    else:
-        cookies = parsed.get("cookies") or {}
-        if not cookies.get("sessionid"):
-            return {"ok": False, "message": (
-                "That paste has no sessionid — open instagram.com → DevTools → Application → "
-                "Cookies → https://www.instagram.com and copy the value of the sessionid row "
-                "(or use “copy as cURL” and paste the whole cookie line).")}
-        expires = int(time.time()) + 365 * 86400
-        lines = ["# Netscape HTTP Cookie File",
-                 "# written by All Video Downloader — an Instagram login session"]
-        for name, value in cookies.items():
-            lines.append(f"{IG_DOMAIN}\tTRUE\t/\tTRUE\t{expires}\t{name}\t{value}")
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        count = len(cookies)
-
-    try:
-        os.chmod(path, 0o600)          # it is a login credential
-    except OSError:
-        pass
-
-    settings.update({"cookies_file": str(path)})
-    reset()                            # a fresh source must be tried, not skipped
-    names = ", ".join(sorted(parsed.get("cookies") or {})) or f"{count} cookies"
-    return {"ok": True, "path": str(path), "count": count, "names": names,
-            "instagram": True,
-            "message": (f"Instagram session saved ({names}). Scan again — the checker now "
-                        "reads it instead of your browser's locked cookie database.")}
-
-
-# ---------------------------------------------------------------------------
 # Diagnostics — the "Check cookies" button
 # ---------------------------------------------------------------------------
 def count_netscape(path: str) -> int:
@@ -307,55 +199,51 @@ def count_netscape(path: str) -> int:
     return n
 
 
-def _read_browser(name: str) -> tuple[bool, int, int, str]:
+def _read_browser(name: str) -> tuple[bool, int, str]:
     """Read a browser's cookies *locally* (no network).
 
-    Returns ``(ok, cookie_count, instagram_count, message)`` and never raises —
-    every failure mode here is something the user can be told about.
+    Returns ``(ok, cookie_count, message)`` and never raises — every failure
+    mode here is something the user can be told about.
     """
     try:
         from yt_dlp.cookies import extract_cookies_from_browser  # noqa: PLC0415
     except Exception as exc:  # noqa: BLE001 — yt-dlp missing
-        return False, 0, 0, f"yt-dlp is not available to read cookies ({exc})"
+        return False, 0, f"yt-dlp is not available to read cookies ({exc})"
     try:
         jar = extract_cookies_from_browser(name)
     except Exception as exc:  # noqa: BLE001 — every failure is a user-facing message
         raw = str(exc) or exc.__class__.__name__
         if is_cookie_error(raw):
-            return False, 0, 0, EXPLAIN
+            return False, 0, EXPLAIN
         if "could not find" in raw.lower() or "no such file" in raw.lower():
-            return False, 0, 0, (f"{name} has no cookie database on this machine ({raw[:150]}) — "
-                                 "is it installed and signed in?")
-        return False, 0, 0, f"Could not read {name} cookies: {raw[:220]}"
-    try:
-        ig = sum(1 for c in jar if "instagram" in str(getattr(c, "domain", "")).lower())
-    except Exception:  # noqa: BLE001
-        ig = 0
+            return False, 0, (f"{name} has no cookie database on this machine ({raw[:150]}) — "
+                              "is it installed and signed in?")
+        return False, 0, f"Could not read {name} cookies: {raw[:220]}"
     n = len(jar)
     if not n:
-        return False, 0, 0, (f"{name} answered but returned no cookies — open {name}, log in to "
-                             "the site you need, then check again.")
-    return True, n, ig, f"{n} cookies readable from {name}."
+        return False, 0, (f"{name} answered but returned no cookies — open {name}, log in to "
+                          "the site you need, then check again.")
+    return True, n, f"{n} cookies readable from {name}."
 
 
 def _probe_browser(name: str) -> tuple[bool, int, str]:
     """_read_browser, and remember the failure of the *configured* source."""
-    ok, n, _ig, msg = _read_browser(name)
+    ok, n, msg = _read_browser(name)
     if not ok and is_cookie_error(msg):
         mark_browser_failure(msg)
     return ok, n, msg
 
 
 def scan_browsers(exclude: str = "") -> list[dict]:
-    """Every readable browser on this machine, Instagram-capable ones first."""
+    """Every browser on this machine whose cookie database reads cleanly."""
     found: list[dict] = []
     for name in CANDIDATES:
         if name == (exclude or "").lower():
             continue
-        ok, n, ig, _msg = _read_browser(name)
+        ok, n, _msg = _read_browser(name)
         if ok:
-            found.append({"browser": name, "count": n, "instagram": ig})
-    found.sort(key=lambda b: (-b["instagram"], -b["count"]))
+            found.append({"browser": name, "count": n})
+    found.sort(key=lambda b: -b["count"])
     return found
 
 
@@ -388,38 +276,6 @@ def active_browser() -> str:
     return auto_browser()
 
 
-def instagram_session() -> dict:
-    """Does the cookie source in effect actually hold an Instagram login?
-
-    A readable Chrome profile with no `sessionid` for instagram.com is the most
-    confusing state of all: gallery-dl works, Instagram answers 404, and the tab
-    looks broken. Cached per session (``reset()`` clears it).
-    """
-    if file_usable():
-        sig = f"file:{cookie_file()}"
-        if sig in _ig_cache:
-            return _ig_cache[sig]
-        try:
-            text = Path(cookie_file()).read_text(encoding="utf-8", errors="ignore").lower()
-        except OSError:
-            text = ""
-        res = {"source": f"cookies.txt ({Path(cookie_file()).name})",
-               "instagram": "instagram" in text, "count": count_netscape(cookie_file())}
-        _ig_cache[sig] = res
-        return res
-    name = active_browser()
-    if not name:
-        return {"source": "", "instagram": False, "count": 0}
-    sig = f"browser:{name}"
-    if sig in _ig_cache:
-        return _ig_cache[sig]
-    ok, n, ig, _msg = _read_browser(name)
-    res = {"source": f"{name} cookies" if ok else "", "instagram": bool(ig),
-           "count": ig, "readable": ok}
-    _ig_cache[sig] = res
-    return res
-
-
 def probe() -> dict:
     """Check whatever cookie source is configured. Never raises."""
     path = cookie_file()
@@ -450,20 +306,14 @@ def probe() -> dict:
     ok, n, msg = _probe_browser(name)
     if ok:
         reset()          # the user fixed it (closed Chrome / logged in) — try again
-        sess = instagram_session()
-        if not sess.get("instagram"):
-            msg += (" …but there is no Instagram login in it: open instagram.com in "
-                    f"{name}, sign in, then check again.")
         return {"ok": True, "mode": "browser", "source": name, "count": n,
-                "instagram": bool(sess.get("instagram")),
                 "alternatives": [], "suggest": "", "message": msg}
     # the chosen browser cannot be read — who else has cookies on this machine?
     alts = scan_browsers(exclude=name)
     if alts:
         best = alts[0]
-        msg += (f" {best['browser']} IS readable here ({best['count']} cookies"
-                + (", Instagram session included" if best["instagram"] else "")
-                + ") — switching to it makes the scan work.")
+        msg += (f" {best['browser']} IS readable here ({best['count']} cookies) — "
+                "switching to it usually makes extraction work.")
     return {"ok": False, "mode": "browser", "source": name, "count": 0,
             "alternatives": alts, "suggest": alts[0]["browser"] if alts else "",
             "message": msg}
@@ -481,10 +331,7 @@ def use_best() -> dict:
     settings.update({"ytdlp_browser_cookies": best["browser"]})
     reset()
     return {"ok": True, "browser": best["browser"], "count": best["count"],
-            "instagram": best["instagram"],
-            "message": (f"Using {best['browser']} cookies now ({best['count']} readable"
-                        + (", Instagram session included" if best["instagram"] else "")
-                        + "). Scan again.")}
+            "message": f"Using {best['browser']} cookies now ({best['count']} readable). Try the link again."}
 
 
 def explain(msg: str) -> str:

@@ -4,6 +4,7 @@ __pycache__/
 downloads/
 dist/
 build/exe/
+build/obj/
 *.log
 .DS_Store
 webfinder.egg-info/

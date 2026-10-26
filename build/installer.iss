@@ -1,21 +1,40 @@
-; WebFinder — Inno Setup installer script
-; Build:  iscc build\installer.iss   (Inno Setup 6: https://jrsoftware.org/isinfo.php)
+; All Video Downloader — Inno Setup script (optional installer)
+;
+;   1. build the EXE first:   build.bat
+;   2. install Inno Setup 6:  winget install JRSoftware.InnoSetup
+;   3. make the installer:    iscc build\installer.iss
+;      -> build\Output\AllVideoDownloader-Setup-2.0.0.exe
+;
+; The EXE it packages is the one build.bat produces: ..\dist\AllVideoDownloader.exe
+
+#define AppName "All Video Downloader"
+#define AppVersion "2.0.0"
+#define AppExe "AllVideoDownloader.exe"
+#define AppPublisher "Behnam Ehsani"
+#define AppURL "https://github.com/wrappedman/AllVideoDownloader"
 
 [Setup]
-AppName=WebFinder
-AppVersion=1.0.0
-AppPublisher=WebFinder Project
-AppSupportURL=https://github.com/wrappedman/WenFinder
-DefaultDirName={autopf}\WebFinder
-DefaultGroupName=WebFinder
-OutputBaseFilename=WebFinder-Setup-1.0.0
+AppId={{8E2F5C31-7B4D-4A63-9C36-9A1D2B7E4F10}
+AppName={#AppName}
+AppVersion={#AppVersion}
+AppVerName={#AppName} {#AppVersion}
+AppPublisher={#AppPublisher}
+AppPublisherURL={#AppURL}
+AppSupportURL={#AppURL}/issues
+DefaultDirName={autopf}\All Video Downloader
+DefaultGroupName={#AppName}
+DisableProgramGroupPage=yes
+OutputDir=Output
+OutputBaseFilename=AllVideoDownloader-Setup-{#AppVersion}
 Compression=lzma2/max
 SolidCompression=yes
-ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
+ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed=x64compatible
 SetupIconFile=icon.ico
-UninstallDisplayIcon={app}\WebFinder.exe
+UninstallDisplayIcon={app}\{#AppExe}
 PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -24,14 +43,16 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Additional icons:"
 
 [Files]
-Source: "..\dist\WebFinder.exe"; DestDir: "{app}"; Flags: ignoreversion
-; Optional — ship FFmpeg next to the EXE so HLS capture works out of the box:
-Source: "..\dist\ffmpeg\*"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+; built by build.bat
+Source: "..\dist\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+; optional: ship FFmpeg next to the EXE so HLS capture works out of the box
+Source: "..\dist\ffmpeg\*"; DestDir: "{app}\ffmpeg"; \
+    Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Icons]
-Name: "{group}\WebFinder"; Filename: "{app}\WebFinder.exe"
-Name: "{group}\Uninstall WebFinder"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\WebFinder"; Filename: "{app}\WebFinder.exe"; Tasks: desktopicon
+Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExe}"
+Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\WebFinder.exe"; Description: "Launch WebFinder"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\{#AppExe}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent

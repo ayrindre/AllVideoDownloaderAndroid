@@ -35,10 +35,6 @@ DEFAULTS: dict[str, Any] = {
     "ytdlp_browser_cookies": "",         # ""|chrome|edge|firefox|brave|chromium — defeats paywall/bot walls
     "cookies_file": "",                  # optional cookies.txt (Netscape) — wins over the browser,
                                          # because a locked/App-Bound-encrypted Chrome DB cannot be read
-    # --- instagram checker (gallery-dl) ------------------------------------
-    "instagram_include": "posts,reels",  # posts,reels,stories,highlights,tagged
-    "instagram_limit": 30,               # newest N posts per tab (0 = everything)
-    "instagram_delay": "",               # "" = gallery-dl's own rate limit (6-12 s/request)
     # --- appearance ----------------------------------------------------------
     "accent": "violet",                  # violet | azure | magenta | mint
     "ambient_effects": True,
@@ -82,7 +78,9 @@ class Settings:
             merged = _deep_merge(DEFAULTS, raw)
             # keys of the retired search module must never resurrect
             for dead in ("engines", "result_limit", "safe_search", "resolve_pages",
-                         "demo_mode", "vertical_mode", "file_types"):
+                         "demo_mode", "vertical_mode", "file_types",
+                         # the retired Instagram checker left these behind
+                         "instagram_include", "instagram_limit", "instagram_delay"):
                 merged.pop(dead, None)
             with _lock:
                 self._data = merged

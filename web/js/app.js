@@ -5,9 +5,8 @@
 
   const NAV = [
     { view: "view-direct", label: "Grab a video", icon: "film", key: "1" },
-    { view: "view-instagram", label: "Instagram checker", icon: "instagram", key: "2" },
-    { view: "view-downloads", label: "Downloads", icon: "download", key: "3", badge: true },
-    { view: "view-settings", label: "Settings", icon: "settings", key: "4" },
+    { view: "view-downloads", label: "Downloads", icon: "download", key: "2", badge: true },
+    { view: "view-settings", label: "Settings", icon: "settings", key: "3" },
   ];
 
   /* ── boot ─────────────────────────────────────────────────────────────── */
@@ -34,7 +33,6 @@
     }
 
     window.DirectView.init();
-    window.InstagramView.init();
     window.DownloadsView.init();
     window.SettingsView.init();
 
@@ -156,12 +154,10 @@
         feat("zap", "Universal link engine", "yt-dlp's ~1,900 extractors, raw .mp4/.mkv files, HLS/DASH manifests, and pages that hide their video — deep-scanned and re-analyzed until a real stream is found."),
         feat("film", "Real quality choice", "Resolution chips carry exact yt-dlp format IDs (`137+140/…`); for raw manifests the variant ladder is parsed locally so you pick the rung — never a lottery."),
         feat("shield", "YouTube, without the drama", "Multi-client extraction (android/tv → ios → web), your browser session cookies on demand, and a daily automatic yt-dlp refresh — the anti-bot treadmill runs under the hood."),
-        feat("instagram", "Instagram checker", "Paste a profile — gallery-dl walks its posts, reels, stories, highlights and tagged media, the app lists every file as a selectable card, and the chosen ones stream through the same Download Manager."),
         feat("download", "Resumable by design", "HTTP Range resume, pause/retry, concurrent fragment HLS capture via FFmpeg with `-c copy` (no re-encode, no quality loss)."),
         feat("cpu", "Native desktop shell", "pywebview window: frameless, HW-accelerated, native folder picker, auto-installed FFmpeg. Or run browser.bat.")),
       el("div", { class: "about-chips" },
         chip(`yt-dlp ${sys.yt_dlp || "—"}`), chip(sys.ffmpeg?.available ? "FFmpeg ✓" : "FFmpeg auto-install"),
-        chip(`gallery-dl ${sys.gallery_dl?.version || "—"}`),
         chip("httpx Range-resume"), chip("FastAPI"), chip("pywebview"), chip("WebView2")),
       el("div", { class: "about-author" },
         el("div", { class: "aa-ava" }, "BE"),
