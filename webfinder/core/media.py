@@ -13,6 +13,12 @@ becomes a downloadable job with a quality ladder you can pick from:
   page    → ordinary web page: deep-scanned (og:video, <source>, raw
             anchors, directory listings); when the scan finds a video,
             the app re-analyzes THAT url instead of dead-ending.
+  webmedia→ the page's own PLAYER CONFIG lists the files (html5player,
+            kt_player, jwplayer, escaped JSON, __NEXT_DATA__, JSON-LD):
+            every real file becomes a quality chip, page kept as Referer.
+            This is the generic answer for tube sites yt-dlp has no
+            working extractor for (xvideos & friends) — see core/embed.py
+            and core/sites.py.
   magnet  → recognized and explained; copy it to your torrent client.
 
 Every path degrades gracefully with an honest error and a fix hint.
@@ -27,7 +33,9 @@ from urllib.parse import urlparse, urljoin, unquote
 import httpx
 
 from ..config import settings
-from . import filekind as fk
+from . import cookies as cookie_state
+from . import embed, filekind as fk, net
+from . import sites as sitelib
 from .ffmpeg_tools import find_ffmpeg, probe
 
 
@@ -39,6 +47,15 @@ def ytcli_use_cli() -> bool:
 def friendly_err(msg: str) -> str:
     from .ytcli import friendly
     return friendly(msg)[:400]
+
+
+def ytcli_use_cli_block(err: str) -> bool:
+    """Does this extractor error look like a bot wall / 403 (impersonation helps)?"""
+    try:
+        from .ytcli import looks_blocked
+        return looks_blocked(err)
+    except Exception:  # noqa: BLE001 — never let classification break analysis
+        return False
 
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36 AVD/2.0"
 
@@ -56,9 +73,9 @@ def base_yt_opts(extra: dict | None = None) -> dict:
     # every client pass — "the CLI works but the app doesn't" root cause.
     opts = {"quiet": True, "no_warnings": True, "noprogress": True,
             "socket_timeout": 30, "retries": 3, "nocheckcertificate": True}
-    browser = (settings.get("ytdlp_browser_cookies") or "").strip()
-    if browser:
-        opts["cookiesfrombrowser"] = (browser,)
+    # cookies.txt wins over the browser source; a browser DB that already failed
+    # in this session is not re-read (it never works twice — see core/cookies.py).
+    opts.update(cookie_state.module_opts())
     px = (settings.get("proxy") or "").strip()
     if px:
         opts["proxy"] = px
@@ -86,7 +103,7 @@ def find_extractor(url: str) -> str:
     """Name of the yt-dlp extractor registered for this URL ('' = none)."""
     return _ie_for(url)
 MEDIA_HREF_RE = re.compile(
-    r"""href=["']([^"']+?\.(?:mp4|mkv|webm|m4v|avi|mov|mp3|flac|m4a|zip|rar|7z|gz|tar|exe|msi|iso|pdf|epub|torrent|m3u8|mpd))["']""",
+    r"""href=["']([^"']+?\.(?:mp4|mkv|webm|m4v|avi|mov|mp3|flac|m4a|zip|rar|7z|gz|tar|exe|msi|iso|pdf|epub|torrent|m3u8|mpd|ts))["']""",
     re.I)
 
 
@@ -181,19 +198,8 @@ def stream_formats(ladder: list[dict]) -> list[dict]:
 
 
 async def fetch_manifest(url: str, referer: str = "") -> str:
-    px = (settings.get("proxy") or "").strip()
-    async with httpx.AsyncClient(follow_redirects=True, timeout=20.0,
-                                 headers={"User-Agent": UA},
-                                 **({"proxy": px} if px else {})) as client:
-        hdrs = {"Range": "bytes=0-524287"}
-        if referer:
-            hdrs["Referer"] = referer
-        try:
-            r = await client.get(url, headers=hdrs)
-            r.raise_for_status()
-            return r.text
-        except httpx.HTTPError as exc:
-            raise RuntimeError(f"Manifest unreachable: {str(exc)[:160]}") from exc
+    """Fetch a playlist with a browser Referer; impersonation retry built in."""
+    return await net.fetch_manifest_text(url, referer=referer)
 
 
 async def _stream_result(url: str, referer: str = "") -> dict:
@@ -224,6 +230,135 @@ async def _stream_result(url: str, referer: str = "") -> dict:
             "single_stream": not ladder}
 
 
+_STREAM_EXTS = ("m3u8", "mpd")
+# candidate origins that describe the SAME video at different qualities
+_PLAYER_ORIGINS = {"og", "video", "embed", "recipe"}
+# sprites / thumbnails / teasers are never a quality rung of the feature video
+_PREVIEW_RE = re.compile(r"thumb|poster|sprite|preview|trailer|sample|placeholder|logo|banner", re.I)
+
+
+
+# quality labels a player uses for the SAME video (as opposed to arbitrary files)
+_LABELLED_QUALTIES = {"High", "Low", "HD", "SD", "Alt", "Alt HD", "HLS", "FLV", "DASH"}
+
+
+def _url_dir(url: str) -> str:
+    try:
+        p = urlparse(url)
+        return f"{p.netloc}{p.path.rsplit('/', 1)[0]}"
+    except ValueError:
+        return ""
+
+
+def _same_video(vids: list[dict]) -> list[dict]:
+    """Keep only the files that plausibly describe ONE video.
+
+    A player config keeps its rungs in one folder (or labels them High/Low/HD)
+    or states their height. A *homepage* full of unrelated clips — one file per
+    folder, no labels — must not become "qualities" of each other.
+    """
+    if len(vids) < 2:
+        return vids
+    top = max(vids, key=lambda c: c.get("score") or 0)
+    home = _url_dir(top.get("url") or "")
+    return [c for c in vids
+            if _url_dir(c.get("url") or "") == home
+            or int(c.get("height") or 0) > 0
+            or (c.get("quality") or "") in _LABELLED_QUALTIES
+            or (c.get("ext") or "") in _STREAM_EXTS]
+
+def _player_formats(cands: list[dict]) -> list[dict]:
+    """Quality ladder built from the files a page's own player config exposes."""
+    forms: list[dict] = []
+    seen: set[str] = set()
+    for c in cands:
+        u = c.get("url") or ""
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        ext = (c.get("ext") or fk.url_extension(u) or "mp4").lower().lstrip(".")
+        h = int(c.get("height") or 0)
+        label = c.get("quality") or (f"{h}p" if h else ext.upper())
+        forms.append({"height": h, "label": label, "codecs": [ext], "fps": 0,
+                      "format": "url", "url": u, "size": c.get("size_bytes"),
+                      "ext": ext, "source": c.get("source") or ""})
+
+    def order(f: dict) -> tuple:
+        stream = f["ext"] in _STREAM_EXTS
+        # adaptive manifests first (they carry every rung), then tallest file
+        return (0 if stream else 1, -(f["height"] or 0))
+    forms.sort(key=order)
+    return forms
+
+
+def _files_card(page_url: str, cands: list[dict], *, title: str = "", site: str = "",
+                thumbnail: str = "", player: str = "", referer: str = "",
+                note: str = "") -> dict | None:
+    """A download card built from ≥2 file variants found in a player config.
+
+    Only *player-derived* candidates qualify: a directory listing full of
+    different movies must never be sold as "qualities of one video".
+    """
+    vids = [c for c in cands
+            if c.get("file_type") in ("video", "audio")
+            and (c.get("origin") or "") in _PLAYER_ORIGINS
+            and not _PREVIEW_RE.search(c.get("url") or "")
+            and c.get("quality") != "Preview"]
+    vids = _same_video(vids)
+    forms = _player_formats(vids)
+    if len(forms) < 2:
+        return None
+    used = {f["url"] for f in forms}
+    rest = [c for c in cands if c.get("url") not in used][:12]
+    payload = {
+        "kind": "webmedia", "url": page_url, "file_type": "video",
+        "title": title or fk.guess_filename(page_url, "video"),
+        "site": site, "player": player or "embedded player",
+        "thumbnail": thumbnail, "referer": referer or page_url,
+        "found_on_page": page_url, "formats": forms,
+        "formats_total": len(forms),
+        "ffmpeg": find_ffmpeg()["available"],
+        "needs_ffmpeg_merge": not find_ffmpeg()["available"],
+    }
+    if note:
+        payload["recovered_after_block"] = note
+    if rest:
+        payload["also_found"] = rest
+    return payload
+
+
+async def _better_from_page(url: str, media: dict) -> dict | None:
+    """Player-config rescue for a capped extractor map.
+
+    yt-dlp can succeed and still hand back a 480p-only map (logged-out client,
+    region profile, site-side cap). When the site's own player config exposes
+    something taller, that is the honest answer — serve it as a card.
+    """
+    recipe = sitelib.recipe_for(url)
+    if not recipe or recipe.family not in ("html5player", "kt_player", "jwplayer"):
+        return None
+    best = max((int(f.get("height") or 0) for f in media.get("formats") or []), default=0)
+    if best >= 720:
+        return None
+    info: dict = {}
+    try:
+        cands = await scan_page(url, limit=24, info=info)
+    except Exception:  # noqa: BLE001
+        return None
+    card = _files_card(url, cands, title=media.get("title") or info.get("title", ""),
+                       site=recipe.name, thumbnail=info.get("thumbnail", ""),
+                       player=info.get("player", ""))
+    if not card:
+        return None
+    top = max((f["height"] or 0) for f in card["formats"])
+    if top <= best:
+        return None
+    card["upgraded_from_extractor"] = (
+        f"{media.get('extractor') or 'yt-dlp'} offered only up to {best}p, so the app "
+        f"read the page's own player config and found {top}p")
+    return card
+
+
 async def analyze(url: str, _depth: int = 0, _referer: str = "") -> dict:
     url = url.strip()
     if not re.match(r"^[a-z]+://", url, re.I) and not url.startswith("magnet:"):
@@ -240,7 +375,13 @@ async def analyze(url: str, _depth: int = 0, _referer: str = "") -> dict:
     # 1) Try the yt-dlp extractor registry — this covers YouTube & friends.
     media, yt_err = await _try_ytdlp(url)
     if media and media.get("formats"):
-        return media
+        # Recognized platform answered — but a capped map is not the whole truth:
+        # a named player family on the same page may expose a taller file.
+        try:
+            upgraded = await _better_from_page(url, media)
+        except Exception:  # noqa: BLE001 — the extractor answer stays authoritative
+            upgraded = None
+        return upgraded or media
     # A media dict with an EMPTY format list is the Generic extractor staring at
     # an HTML shell — never a verdict. Keep walking to the probe + deep-scan path
     # (which is what actually finds the video such pages embed).
@@ -252,14 +393,31 @@ async def analyze(url: str, _depth: int = 0, _referer: str = "") -> dict:
         # The extractor was refused — that is NOT the end. Tube/porn embed pages
         # usually link their master manifest or mp4 in plain HTML; dig for it
         # and RE-ANALYZE, serving a real download card, with the refusal noted.
+        page_info: dict = {}
         try:
-            cand = await scan_page(url)
+            cand = await scan_page(url, limit=24, info=page_info)
         except Exception:  # noqa: BLE001
             cand = []
         vids = [c for c in cand
                 if fk.classify(c["url"]) == "video"
                 or fk.url_extension(c["url"]) in fk.VIDEO_EXTS | fk.STREAM_EXTS]
         emb = [c for c in cand if c.get("file_type") == "embed"]
+        # A player config that exposes SEVERAL files becomes a full quality
+        # ladder immediately — better than guessing one file and hoping.
+        try:
+            card = _files_card(
+                url, cand, title=page_info.get("title", ""),
+                site=page_info.get("site", ""), thumbnail=page_info.get("thumbnail", ""),
+                player=page_info.get("player", ""),
+                note=(f"{ie} extractor refused the page, so the app served the files "
+                      "the page's own player config exposes"))
+        except Exception:  # noqa: BLE001
+            card = None
+        if card:
+            card["blocked_extractor"] = ie
+            if yt_err:
+                card["extractor_error"] = friendly_err(yt_err)
+            return card
         targets = vids + emb
         for t in targets[:4]:
             try:
@@ -285,11 +443,20 @@ async def analyze(url: str, _depth: int = 0, _referer: str = "") -> dict:
         if not settings.get("ytdlp_browser_cookies"):
             hints.append("Set Settings → Video & capture → <b>Browser cookies source</b> to <code>chrome</code>/<code>edge</code> so yt-dlp can use your logged-in session.")
         hints.append("The app auto-refreshes yt-dlp daily — if it just updated, restart All Video Downloader once.")
+        if page_info.get("site"):
+            hints.append(f"<b>{page_info['site']}</b> is in the built-in recipe list, so this refusal came from "
+                         "the site itself (region/age wall, removed video, or a player change) — not from a "
+                         "missing algorithm.")
+        if not net.has_impersonation():
+            hints.append("Bot walls (Cloudflare “Just a moment”, 403 to non-browsers) are defeated by TLS "
+                         "impersonation. Run <code>pip install curl_cffi</code> once and the app retries those "
+                         "pages and downloads with a real browser fingerprint automatically.")
         if not ytcli_use_cli():
             hints.append("Tip: if <code>yt-dlp</code> in your terminal works better, install it on PATH and restart — "
                          "All Video Downloader prefers your newer system binary over its bundled copy automatically.")
         return {"kind": "media_error", "url": url, "extractor": ie, "file_type": "video",
-                "title": fk.guess_filename(url, ie),
+                "site": page_info.get("site", ""),
+                "title": page_info.get("title") or fk.guess_filename(url, ie),
                 "error": friendly_err(yt_err or "yt-dlp returned no info"),
                 "hints": hints, "candidates": (vids + emb) or cand}
 
@@ -303,6 +470,23 @@ async def analyze(url: str, _depth: int = 0, _referer: str = "") -> dict:
             if resp.status_code >= 400 or not (resp.headers.get("content-type") or resp.headers.get("content-length")):
                 resp = await client.get(url, headers={"Range": "bytes=0-1"})
         except httpx.HTTPError as exc:
+            # The host refused a plain HEAD/GET. Before declaring it unreachable,
+            # give the page path (browser headers + TLS impersonation retry) and
+            # the built-in recipes a chance — most "dead" tube links live here.
+            page_info: dict = {}
+            cand = await scan_page(url, limit=24, info=page_info)
+            card = _files_card(url, cand, title=page_info.get("title", ""),
+                               site=page_info.get("site", ""),
+                               thumbnail=page_info.get("thumbnail", ""),
+                               player=page_info.get("player", ""), referer=_referer)
+            if card:
+                if _referer:
+                    card["referer"] = _referer
+                return card
+            if cand:
+                return {"kind": "page", "url": url, "title": page_info.get("title", ""),
+                        "site": page_info.get("site", ""), "candidates": cand,
+                        "content_type": "text/html", "size": None}
             raise RuntimeError(f"Host unreachable: {exc}") from exc
 
         ctype = (resp.headers.get("content-type") or "").lower()
@@ -353,11 +537,24 @@ async def analyze(url: str, _depth: int = 0, _referer: str = "") -> dict:
     # 3) Ordinary page — deep-scan for the video it actually hosts. A found
     #    video/manifest URL is RE-ANALYZED (one level deep) instead of
     #    dead-ending in a candidate list.
-    candidates = await scan_page(final)
+    page_info: dict = {}
+    candidates = await scan_page(final, limit=24, info=page_info)
     vids = [c for c in candidates
             if fk.classify(c["url"]) == "video"
             or fk.url_extension(c["url"]) in fk.VIDEO_EXTS | fk.STREAM_EXTS]
     emb = [c for c in candidates if c.get("file_type") == "embed"]
+
+    # 3a) The page's player config exposes several files (xvideos High/Low,
+    #     kt_player HD/SD, a manifest + fallbacks…): that is already a complete
+    #     card with a real quality ladder. Serve it with the page as Referer —
+    #     no guessing which single file the user wanted.
+    card = _files_card(final, candidates, title=page_info.get("title", ""),
+                       site=page_info.get("site", ""),
+                       thumbnail=page_info.get("thumbnail", ""),
+                       player=page_info.get("player", ""), referer=_referer)
+    if card:
+        return card
+
     targets = vids + emb          # plain files first, scripted players second
     if targets and _depth < 2:
         targets.sort(key=lambda c: (-int(c.get("size_bytes") or 0),
@@ -379,7 +576,8 @@ async def analyze(url: str, _depth: int = 0, _referer: str = "") -> dict:
                 return sub
         except Exception:  # noqa: BLE001 — fall through to the plain page card
             pass
-    return {"kind": "page", "url": final, "title": "", "size": size,
+    return {"kind": "page", "url": final, "title": page_info.get("title", ""),
+            "site": page_info.get("site", ""), "size": size,
             "content_type": ctype, "candidates": candidates}
 
 
@@ -433,7 +631,9 @@ def _module_attempt(url: str, mode: dict, *, no_cookies: bool = False
         if client_extra:
             extra["extractor_args"] = {"youtube": client_extra}
         if no_cookies:
-            extra["cookiesfrombrowser"] = None      # falsy → yt-dlp skips the read
+            # falsy → yt-dlp skips the read; covers both sources
+            extra["cookiesfrombrowser"] = None
+            extra["cookiefile"] = None
         try:
             with yt_dlp.YoutubeDL(base_yt_opts(extra)) as ydl:
                 infos.append((client_extra, ydl.extract_info(url, download=False)))
@@ -446,6 +646,18 @@ def _module_attempt(url: str, mode: dict, *, no_cookies: bool = False
             break                                       # rich map — stop hammering
         if (infos[-1][1] or {}).get("_type") == "playlist":
             break                                       # listing worked; no rescue needed
+    # Every client refused? If the refusal smells like a bot wall (403/Cloudflare)
+    # and curl_cffi is installed, retry once with a real browser TLS fingerprint.
+    if not infos and any(ytcli_use_cli_block(err) for err in errors):
+        from . import ytcli
+        target = ytcli.impersonate_target()
+        if target is not None:
+            try:
+                with yt_dlp.YoutubeDL(base_yt_opts({**mode, "impersonate": target})) as ydl:
+                    infos.append(({"impersonate": True}, ydl.extract_info(url, download=False)))
+            except Exception as exc:  # noqa: BLE001
+                from .ytcli import friendly
+                errors.append(friendly(str(exc))[:220])
     if not infos:
         return None, " · ".join(dict.fromkeys(errors)) or "yt-dlp returned nothing", {}
     info, win = _merge_infos(infos)
@@ -474,6 +686,15 @@ def _cli_attempt(url: str, mode: dict) -> tuple[dict | None, str, dict]:
             break
         if info.get("_type") == "playlist":
             break
+    if not infos and any(ytcli_use_cli_block(err) for err in errors) \
+            and ytcli.impersonation_available():
+        info, err = ytcli.extract(url, flat=flat, playlist_items=items, noplaylist=np,
+                                  client=None, referer=mode.get("_referer", ""),
+                                  impersonate=True)
+        if info is not None:
+            infos.append(({"impersonate": True}, info))
+        elif err:
+            errors.append(err)
     if not infos:
         return None, " · ".join(dict.fromkeys(errors)) or "yt-dlp CLI returned nothing", {}
     info, win = _merge_infos(infos)
@@ -491,13 +712,18 @@ def _attempt_extract(url: str, mode: dict) -> tuple[dict | None, str, dict]:
     if ytcli.use_cli():
         return _cli_attempt(url, mode)
     info, err, win = _module_attempt(url, mode)
-    if (info is None and err and ytcli._ERR_MARKERS.search(err)
-            and (settings.get("ytdlp_browser_cookies") or "").strip()):
+    # A cookie source that cannot be read is a SETUP problem, not a verdict on
+    # this URL: retry once anonymously (and remember it for the whole session so
+    # the next attempt does not pay the same timeout).
+    cookie_blocked = bool(err) and cookie_state.mark_browser_failure(err)
+    if info is None and err and (cookie_blocked or
+                                 (ytcli._ERR_MARKERS.search(err)
+                                  and (settings.get("ytdlp_browser_cookies") or "").strip())):
         info2, err2, win2 = _module_attempt(url, mode, no_cookies=True)
         if info2 is not None:
             return info2, "", win2
         if err2:   # anonymous pass saw something NEWER — surface that instead
-            return None, f"{err2} · (retried without browser cookies — still refused)", {}
+            return None, err2, {}
     return info, err, win
 
 
@@ -634,32 +860,51 @@ async def _try_ytdlp(url: str) -> tuple[dict | None, str]:
 # ---------------------------------------------------------------------------
 # Page scanning — crawl a result page for hidden direct file links
 # ---------------------------------------------------------------------------
-_OG_RE = re.compile('<meta[^>]+property=["\']og:(?:video|audio|image)(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']', re.I)
-_VIDSRC_RE = re.compile('<(?:video|source)[^>]+src=["\']([^"\']+)["\']', re.I)
+_OG_RE = re.compile('<meta[^>]+property=["\']og:(?:video|audio|image)(?::(?:secure_url|url))?["\'][^>]+content=["\']([^"\']+)["\']', re.I)
+# <video src> / <source src> / lazily-loaded variants (data-src, data-video…)
+_VIDSRC_RE = re.compile('<(?:video|source)[^>]+(?:data-)?src=["\']([^"\']+)["\']', re.I)
 
 _IFRAME_RE = re.compile('<iframe[^>]+src=["\']([^"\']+)["\']', re.I)
 
-async def scan_page(url: str, limit: int = 12, wanted=None) -> list[dict]:
+async def scan_page(url: str, limit: int = 12, wanted=None, referer: str = "",
+                    info: dict | None = None) -> list[dict]:
     """Deep-scan one page for hidden direct media files.
 
     Understands: bare file anchors (href ending in a media extension),
     ``og:video/og:audio/og:image`` meta tags, ``<video>/<source>`` sources,
-    and classic Apache/nginx *index of* listings (name + size + date columns).
+    classic Apache/nginx *index of* listings (name + size + date columns) —
+    and, most importantly, the **player configuration** every tube site keeps
+    in its HTML: ``html5player.setVideoUrlHigh(...)``, ``video_url:``,
+    ``sources: [{file: ...}]``, escaped JSON, ``__NEXT_DATA__``, JSON-LD…
+    (see :mod:`webfinder.core.embed` and :mod:`webfinder.core.sites`).
+
     ``wanted`` optionally restricts results to a compiled extension regex.
+    ``info`` (optional out-param) receives the page title/poster/site so the
+    analyzer can build a proper card without fetching the page twice.
     """
     import re as _re
-    async with httpx.AsyncClient(follow_redirects=True, timeout=httpx.Timeout(12.0, connect=8.0),
-                                 headers={"User-Agent": UA}) as client:
-        try:
-            resp = await client.get(url)
-            resp.raise_for_status()
-        except httpx.HTTPError:
-            return []
-    text = resp.text
+    from urllib.parse import urlparse as _up
+
+    text, final, _hdrs = await net.fetch_text(url, referer=referer, timeout=14.0)
+    if not text:
+        return []
+    base = final or url
     seen: set[str] = set()
     out: list[dict] = []
 
-    def _push(full: str, size: int | None = None) -> None:
+    # page metadata for the result card (title, poster, which site/player)
+    if info is not None:
+        meta = embed.page_meta(text, base)
+        recipe = sitelib.recipe_for(base)
+        info.setdefault("title", meta["title"])
+        info.setdefault("thumbnail", meta["thumbnail"])
+        info["site"] = recipe.name if recipe else sitelib.site_name(base)
+        info["recipe"] = recipe.key if recipe else ""
+        info["player"] = sitelib.detect_family(text)
+        info["page_url"] = base
+
+    def _push(full: str, size: int | None = None, origin: str = "anchor",
+              item: dict | None = None) -> None:
         if not full.startswith(("http://", "https://")) or full in seen:
             return
         if wanted is not None and not wanted.search(full):
@@ -668,31 +913,42 @@ async def scan_page(url: str, limit: int = 12, wanted=None) -> list[dict]:
            and not _re.search(r"\.(mp4|mkv|webm|mov|avi|flv|m4v|zip|rar|7z|t?gz|epub|pdf|djvu|mp3|flac|ogg|m4a|wav|opus|aac)$", full, _re.I):
             return
         seen.add(full)
-        entry = {"url": full, "filename": unquote(fk.guess_filename(full, "file")),
-                 "file_type": fk.classify(full), "size_bytes": size}
+        entry = item or {"url": full, "filename": unquote(fk.guess_filename(full, "file")),
+                         "file_type": fk.classify(full), "size_bytes": size}
+        entry["origin"] = origin
         out.append(entry)
 
-    # og: + <source>/<video> tags
+    # og: + <video>/<source> tags
     for m in _re.finditer(_OG_RE, text):
-        _push(urljoin(str(resp.url), unescape_html(m.group(1))))
+        _push(urljoin(base, unescape_html(m.group(1))), origin="og")
     for m in _re.finditer(_VIDSRC_RE, text):
-        _push(urljoin(str(resp.url), unescape_html(m.group(1))))
+        _push(urljoin(base, unescape_html(m.group(1))), origin="video")
     # iframe players — many (most?) tube/porn embed pages only expose the real
     # player through a cross-origin iframe; we hand it to the analyzer as an
     # "embed" candidate and hop into it ourselves when nothing better exists.
     for m in _re.finditer(_IFRAME_RE, text):
-        src = urljoin(str(resp.url), unescape_html(m.group(1)))
+        src = urljoin(base, unescape_html(m.group(1)))
         if not src.startswith("http") or src in seen:
             continue
         low = src.lower()
         if not any(t in low for t in ("video", "embed", "player", "watch", "media", "/vid")):
             continue
         seen.add(src)
-        from urllib.parse import urlparse as _up
         pr = _up(src)
         out.append({"url": src,
                     "filename": f"embed · {pr.netloc}{pr.path[:36]}",
-                    "file_type": "embed", "size_bytes": None})
+                    "file_type": "embed", "size_bytes": None, "origin": "embed"})
+
+    # ── player configs / escaped JSON / recipe families ────────────────────
+    # (inserted before the plain anchors so a 12-result page full of links
+    # cannot crowd out the actual video)
+    try:
+        embedded = sitelib.candidates(text, base, limit=max(limit * 3, 24))
+    except Exception:  # noqa: BLE001 — extraction must never break the scan
+        embedded = []
+    for c in embedded:
+        _push(c["url"], c.get("size_bytes"), origin=c.get("source") or "embed", item=dict(c))
+
     # plain file anchors + directory listings (name  <tab> size)
     for m in _re.finditer(MEDIA_HREF_RE, text):
         href = unescape_html(m.group(1))
@@ -703,7 +959,7 @@ async def scan_page(url: str, limit: int = 12, wanted=None) -> list[dict]:
         sm = _re.search(r"(\d+(?:[.,]\d+)\s?(?:\s?)(?:KB|MB|GB|TB))", tail, _re.I)
         if sm:
             size = _human_size_local(sm.group(1))
-        _push(urljoin(str(resp.url), href), size)
+        _push(urljoin(base, href), size, origin="anchor")
     return out[:limit]
 
 
@@ -732,6 +988,10 @@ def unescape_html(s: str) -> str:
 # ---------------------------------------------------------------------------
 async def plan_download(url: str, title: str = "", fmt: dict | None = None) -> dict:
     """Return the enqueue kwargs for any URL (used by result cards & direct link)."""
+    # a `webmedia` chip carries the exact file it names — never re-analyze the page
+    if fmt and fmt.get("format") == "url" and fmt.get("url"):
+        url = str(fmt["url"])
+        title = title or fmt.get("label", "")
     ext = fk.url_extension(url)
     if ext in fk.STREAM_EXTS:
         fmt = fmt or {}
@@ -755,7 +1015,10 @@ async def plan_download(url: str, title: str = "", fmt: dict | None = None) -> d
         return {"url": url, "kind": "magnet", "title": _magnet_title(url),
                 "file_type": "magnet", "meta": {}}
     media = None
-    if not ext or await asyncio.to_thread(find_extractor, url):
+    # a URL that IS the file (…/clip.mp4) goes straight to the http worker;
+    # the site's extractor only knows how to parse pages, not files
+    if ext not in fk.VIDEO_EXTS | fk.AUDIO_EXTS and (
+            not ext or await asyncio.to_thread(find_extractor, url)):
         media, _err = await _try_ytdlp(url)
     if media:
         quality = str(settings.get("default_quality", "1080"))  # noqa: E501
@@ -773,8 +1036,10 @@ async def plan_download(url: str, title: str = "", fmt: dict | None = None) -> d
                 "meta": {"format": fmt_spec, "quality": (chosen or {}).get("label", "best"),
                          "extractor": media["extractor"],
                          "extractor_args": media.get("extractor_args") or None}}
-    # If the user explicitly chose a format card, trust yt-dlp.
-    if fmt and fmt.get("format"):
+    # If the user explicitly chose a format card, trust yt-dlp — but a
+    # `webmedia` chip ("format": "url") already names a real file, so the
+    # generic http worker owns it (its own headers + Referer + resume).
+    if fmt and fmt.get("format") and fmt.get("format") != "url":
         return {"url": url, "kind": "ytdlp", "title": title or fk.guess_filename(url),
                 "file_type": "video", "meta": {"format": fmt["format"],
                                                "quality": fmt.get("label", "")}}

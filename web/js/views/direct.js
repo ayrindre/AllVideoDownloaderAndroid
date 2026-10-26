@@ -36,7 +36,9 @@
       el("p", { style: { marginTop: "22px", fontSize: "13.5px", lineHeight: 1.6 } },
         "Every quality the link exposes becomes a button: platform videos resolve through ", el("b", {}, "yt-dlp"),
         " with real format IDs, ", el("code", {}, ".m3u8"), "/", el("code", {}, ".mpd"),
-        " manifests get their variant ladder parsed, raw files stream straight into the manager, and pages are deep-scanned for the video hiding inside them.")));
+        " manifests get their variant ladder parsed, raw files stream straight into the manager, and pages are deep-scanned for the video hiding inside them."),
+      (S.meta?.sites?.recipes || 0) ? el("p", { style: { marginTop: "10px", fontSize: "12px", color: "var(--text-3)" } },
+        `${S.meta.sites.recipes} built-in site recipes (tube sites, Persian, Chinese and mainstream platforms) + universal player-config extraction: a page link is enough.`) : null));
   }
 
   async function analyze() {
@@ -82,6 +84,7 @@
     if (d.kind === "media_error") renderMediaError(d);
     else if (d.kind === "media") renderMedia(d);
     else if (d.kind === "hls") renderHls(d);
+    else if (d.kind === "webmedia") renderWebMedia(d);
     else if (d.kind === "direct") renderDirect(d);
     else if (d.kind === "magnet") renderMagnet(d);
     else renderPage(d);
@@ -90,7 +93,12 @@
       c?.prepend(el("div", { class: "notice ok", style: { marginBottom: "12px" } },
         el("span", { html: ICONS.svg("info") }),
         el("div", {}, d.recovered_after_block +
-          " — the download uses the recovered link, not the blocked page.")));
+          " — the download uses the recovered file, not the blocked page.")));
+    }
+    if (d.upgraded_from_extractor) {
+      const c = document.querySelector("#analyze-stage .analyze-card");
+      c?.prepend(el("div", { class: "notice ok", style: { marginBottom: "12px" } },
+        el("span", { html: ICONS.svg("info") }), el("div", {}, d.upgraded_from_extractor)));
     }
   }
 
@@ -204,6 +212,83 @@
     const hit = formats.find((f) => String(f.height) === want);
     if (hit) return hit.height;
     return (formats.find((f) => f.height) || formats[0] || {}).height;
+  }
+
+  /* A page whose own player config lists the files (xvideos, xnxx, xHamster,
+     kt_player tubes, jwplayer/video.js pages, __NEXT_DATA__ apps…): every file
+     it exposes becomes a chip, and the page rides along as Referer. */
+  function renderWebMedia(d) {
+    const card = cardShell(`PLAYER · ${d.site || d.player || "embedded"}`, "#22d3ee");
+    const grid = el("div", { class: "ac-grid" });
+    const thumb = el("div", { class: "ac-thumb" });
+    if (d.thumbnail) { const img = el("img", { alt: "" }); img.onerror = () => img.remove(); img.src = d.thumbnail; thumb.append(img); }
+    else thumb.style.background = "linear-gradient(140deg, #0b2a33, #0f172a)";
+
+    const info = el("div", {});
+    info.append(el("h2", { class: "ac-title" }, d.title || d.url));
+    info.append(el("div", { class: "ac-meta" },
+      el("span", { html: `${ICONS.svg("film")} ${escapeHtml(d.player || "player")} config` }),
+      el("span", { html: `${ICONS.svg("db")} ${d.formats.length} files listed` }),
+      d.site ? el("span", { html: `${ICONS.svg("globe")} ${escapeHtml(d.site)}` }) : null));
+    info.append(el("div", { class: "notice info", style: { marginBottom: "12px" } },
+      el("span", { html: ICONS.svg("info") }),
+      el("div", {}, "These files come straight from the page's player — no extractor guesswork. ",
+        "The hosting page is sent as ", el("b", {}, "Referer"), " so hotlink-guarded CDNs answer like they do in a browser.")));
+
+    const want = String(S.settings?.default_quality || "1080");
+    let sel = d.formats.find((f) => String(f.height) === want) || d.formats[0];
+    let dlBtn = null;
+    info.append(el("div", { class: "ac-block-label" }, "File the player offers"));
+    const qrow = el("div", { class: "chip-set", style: { justifyContent: "flex-start" } });
+    for (const f of d.formats) {
+      const active = f === sel;
+      const label = f.label || (f.ext || "file").toUpperCase();
+      const chip = el("button", { class: `chip${active ? " on" : ""}`, type: "button",
+        style: { "--chip-c": f.height >= 2160 ? "#f472b6" : f.height ? "#22d3ee" : "#38bdf8", height: "34px", padding: "0 13px" } },
+        el("span", { html: ICONS.svg(f.height ? "film" : "link") }), label);
+      chip.addEventListener("click", () => {
+        sel = f;
+        [...qrow.children].forEach((c) => c.classList.remove("on"));
+        chip.classList.add("on");
+        if (dlBtn) dlBtn.querySelector("span:last-child").textContent = `Download ${label}`;
+      });
+      qrow.append(chip);
+    }
+    info.append(qrow);
+
+    const actions = el("div", { class: "ac-actions" },
+      dlBtn = el("button", { class: "btn btn-primary", onclick: (e) => downloadFromPlayer(e, d, sel) },
+        el("span", { class: "btn-ico", html: ICONS.svg("download") }),
+        el("span", {}, `Download ${sel.label || (sel.ext || "file").toUpperCase()}`)),
+      el("button", { class: "btn btn-ghost", onclick: () => { window.UI.copyText(sel.url); toast("File link copied.", "ok", { icon: "copy" }); } },
+        el("span", { class: "btn-ico", html: ICONS.svg("copy") }), el("span", {}, "Copy file link")),
+      el("a", { class: "btn btn-ghost", href: d.url, target: "_blank", rel: "noopener" },
+        el("span", { class: "btn-ico", html: ICONS.svg("external") }), el("span", {}, "Open page")));
+    info.append(actions);
+    const more = moreBlock(d);
+    if (more) info.append(more);
+    grid.append(thumb, info);
+    card.append(grid);
+  }
+
+  /* the server picks the worker (http for files, hls/yt-dlp for manifests) —
+     we only hand it the exact file the user clicked, plus the page Referer */
+  async function downloadFromPlayer(e, d, f) {
+    const btn = e.currentTarget;
+    const original = btn.innerHTML;
+    btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>`;
+    try {
+      const ext = (f.ext || "mp4").replace(/^\./, "");
+      await window.API.startDownload({
+        url: f.url,
+        title: d.title || "",
+        filename: `${(d.title || "video").slice(0, 120)}.${ext}`,
+        meta: { referer: d.referer || d.found_on_page || d.url },
+      });
+      toast("Transfer started — watch it in the Download Manager.", "ok",
+        { icon: "dl", actionLabel: "View", onAction: () => S.emit("nav", "view-downloads") });
+    } catch (err) { toast(err.message, "err"); }
+    finally { btn.disabled = false; btn.innerHTML = original; }
   }
 
   function renderHls(d) {
@@ -357,7 +442,9 @@
 
   function renderPage(d) {
     const card = cardShell("PAGE · no direct file", "#8b8b96");
-    card.append(el("h2", { class: "ac-title", style: { marginBottom: 8 } }, d.url));
+    card.append(el("h2", { class: "ac-title", style: { marginBottom: 8 } }, d.title || d.url));
+    if (d.site) card.append(el("div", { class: "ac-meta", style: { marginBottom: 6 } },
+      el("span", { html: `${ICONS.svg("globe")} ${escapeHtml(d.site)}` })));
     card.append(el("p", { style: { fontSize: 13, color: "var(--text-2)", lineHeight: 1.7 } },
       "That URL plays its video through a script — no plain file link surfaced as a single answer."));
     const box = el("div");

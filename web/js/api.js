@@ -32,6 +32,11 @@
     exit: () => req("POST", "/api/system/exit"),
     scan: (url) => req("POST", "/api/scan", { url }),
     selfupdate: () => req("POST", "/api/system/selfupdate"),
+
+    /* ── cookies (used by the download engine) ──────────────────────────── */
+    cookiesStatus: () => req("GET", "/api/cookies/status"),
+    cookiesProbe: () => req("GET", "/api/cookies/probe"),
+    cookiesUseBest: () => req("POST", "/api/cookies/use-best"),
   };
 
   /* ── desktop bridge: window controls & native dialogs via pywebview ──── */

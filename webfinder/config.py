@@ -33,6 +33,8 @@ DEFAULTS: dict[str, Any] = {
     "default_quality": "1080",           # "best" | 2160 | 1440 | 1080 | 720 | 480
     "ffmpeg_path": "",                   # manual override if not on PATH
     "ytdlp_browser_cookies": "",         # ""|chrome|edge|firefox|brave|chromium — defeats paywall/bot walls
+    "cookies_file": "",                  # optional cookies.txt (Netscape) — wins over the browser,
+                                         # because a locked/App-Bound-encrypted Chrome DB cannot be read
     # --- appearance ----------------------------------------------------------
     "accent": "violet",                  # violet | azure | magenta | mint
     "ambient_effects": True,
@@ -76,7 +78,9 @@ class Settings:
             merged = _deep_merge(DEFAULTS, raw)
             # keys of the retired search module must never resurrect
             for dead in ("engines", "result_limit", "safe_search", "resolve_pages",
-                         "demo_mode", "vertical_mode", "file_types"):
+                         "demo_mode", "vertical_mode", "file_types",
+                         # the retired Instagram checker left these behind
+                         "instagram_include", "instagram_limit", "instagram_delay"):
                 merged.pop(dead, None)
             with _lock:
                 self._data = merged

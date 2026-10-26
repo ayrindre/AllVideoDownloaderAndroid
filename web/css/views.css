@@ -96,11 +96,12 @@
 .ac-meta svg { width: 13px; height: 13px; opacity: .8; }
 .ac-block-label { font-size: 10.5px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-3); margin: 16px 0 8px; }
 .ac-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 18px; }
-.kv { display: flex; justify-content: space-between; gap: 18px; padding: 9px 2px; font-size: 13px;
-  border-bottom: 1px solid rgba(255,255,255,.05); }
+.kv { display: flex; justify-content: space-between; align-items: baseline; gap: 18px;
+  padding: 8px 2px; font-size: 12.5px; border-bottom: 1px solid rgba(255,255,255,.05); }
 .kv:last-child { border-bottom: 0; }
-.kv .k { color: var(--text-3); }
-.kv .v { color: var(--text); font-weight: 600; text-align: right; overflow-wrap: anywhere; }
+.kv .k { color: var(--text-3); flex: none; }
+.kv .v { color: var(--text); font-weight: 600; text-align: right; overflow-wrap: anywhere; min-width: 0; }
+.kv .v code { font-size: 11.5px; color: var(--text-2); }
 .notice { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 12px;
   overflow-wrap: anywhere; word-break: break-word; min-width: 0;
   font-size: 12.5px; line-height: 1.55; }
@@ -142,7 +143,7 @@
 .dl-status { flex: none; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: .6px;
   padding: 3px 8px; border-radius: 6px; }
 .st-downloading { color: var(--accent); background: var(--accent-soft); }
-.st-downloading .dl-status::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px;
+.dl-status.st-downloading::before { content: ""; display: inline-block; width: 6px; height: 6px; margin-right: 5px;
   border-radius: 50%; background: currentColor; animation: ping 1.4s infinite; }
 .st-queued { color: var(--text-3); background: var(--panel-strong); }
 .st-paused { color: var(--warn); background: rgba(251,191,36,.1); }
@@ -162,29 +163,69 @@
   transform: translateX(-100%); animation: dl-sheen 1.8s var(--ease) infinite; }
 .dl-row.is-done .dl-sheen, .dl-row.is-paused .dl-sheen, .dl-row.is-error .dl-sheen { animation: none; opacity: 0; }
 @keyframes dl-sheen { to { transform: translateX(220%); } }
-.dl-line2 { display: flex; gap: 16px; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums; }
+.dl-line2 { display: flex; gap: 16px; font-size: 11.5px; color: var(--text-3); font-variant-numeric: tabular-nums;
+  align-items: center; }
+.dl-line2 svg { width: 12px; height: 12px; opacity: .85; vertical-align: -2px; }
+.dl-speed, .dl-eta { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
 .dl-line2 b { color: var(--text-2); font-weight: 600; }
 .dl-speed { color: var(--info); }
 .dl-actions { display: flex; gap: 4px; opacity: .55; transition: opacity var(--t-fast); }
 .dl-row:hover .dl-actions { opacity: 1; }
 
 /* ── settings view ────────────────────────────────────────────────────────── */
-.settings-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 16px;
-  align-items: start; max-width: 1180px; }
-.set-card { border-radius: 18px; padding: 20px 22px 22px; margin-bottom: 2px; }
-.set-card h3 { display: flex; align-items: center; gap: 10px; font-size: 14.5px; font-weight: 660; margin-bottom: 4px; }
-.set-card h3 svg { width: 16px; height: 16px; color: var(--accent); }
-.set-card .sc-sub { font-size: 12px; color: var(--text-3); margin-bottom: 16px; line-height: 1.5; }
-.field { margin-bottom: 15px; }
-.field:last-child { margin-bottom: 0; }
-.field label.f-label { display: block; font-size: 11px; letter-spacing: .5px; text-transform: uppercase; color: var(--text-3); margin-bottom: 7px; }
-.input, select.input { width: 100%; height: 38px; border-radius: 10px; padding: 0 12px; outline: none;
-  background: rgba(0,0,0,.3); border: 1px solid var(--panel-border); color: var(--text); font-size: 13px;
+/* Two balanced columns of compact cards. Cards size to their content (no
+   stretched empty boxes), and the whole thing folds to one column on narrow
+   windows. Order is deliberate: what you download → how it's captured. */
+.settings-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px; align-items: stretch; max-width: 1240px; }
+@media (max-width: 1020px) { .settings-grid { grid-template-columns: minmax(0, 1fr); } }
+
+.set-card { border-radius: 18px; padding: 18px 20px 20px; display: flex; flex-direction: column; }
+.set-card .sc-head { display: flex; gap: 12px; align-items: flex-start; }
+.set-card .sc-ico { width: 34px; height: 34px; flex: none; border-radius: 11px; display: grid;
+  place-items: center; background: var(--accent-soft); border: 1px solid var(--panel-border); }
+.set-card .sc-ico svg { width: 16px; height: 16px; color: var(--accent); }
+.set-card h3 { font-size: 14.5px; font-weight: 660; letter-spacing: -.1px; line-height: 1.35; }
+.set-card .sc-sub { font-size: 12px; color: var(--text-3); margin-top: 3px; line-height: 1.5; }
+.set-card .sc-body { margin-top: 16px; padding-top: 16px; border-top: 1px solid rgba(255,255,255,.055);
+  display: flex; flex-direction: column; gap: 15px; flex: 1; }
+.set-card .sc-body > .set-row { padding: 0; border-bottom: 0; }
+
+/* fields */
+.field { min-width: 0; }
+.field > .f-label { display: block; font-size: 11px; letter-spacing: .5px; text-transform: uppercase;
+  color: var(--text-3); margin-bottom: 7px; }
+.field .f-hint { font-size: 11.5px; color: var(--text-3); margin-top: 7px; line-height: 1.55; }
+/* long explanations collapse to one line so the page stays scannable */
+.f-more { margin-top: 7px; }
+.f-more > summary { font-size: 11.5px; color: var(--text-3); cursor: pointer; list-style: none;
+  display: inline-flex; align-items: center; gap: 5px; transition: color var(--t-fast); }
+.f-more > summary::-webkit-details-marker { display: none; }
+.f-more > summary::before { content: "?"; width: 14px; height: 14px; border-radius: 50%; flex: none;
+  display: grid; place-items: center; font-size: 9.5px; font-weight: 800; color: var(--text-3);
+  border: 1px solid var(--panel-border); }
+.f-more > summary:hover { color: var(--text-2); }
+.f-more[open] > summary { color: var(--accent); }
+.f-more[open] > summary::before { color: var(--accent); border-color: currentColor; }
+.f-more p { font-size: 11.5px; color: var(--text-3); line-height: 1.6; margin-top: 6px;
+  padding: 9px 11px; border-radius: 10px; background: rgba(255,255,255,.025);
+  border: 1px solid rgba(255,255,255,.05); }
+.set-pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; }
+@media (max-width: 560px) { .set-pair { grid-template-columns: minmax(0, 1fr); } }
+
+.input, select.input, textarea.input { width: 100%; min-width: 0; height: 38px; border-radius: 10px;
+  padding: 0 12px; outline: none; font-family: inherit; background: rgba(0,0,0,.3);
+  border: 1px solid var(--panel-border); color: var(--text); font-size: 13px;
   transition: border-color var(--t-fast), box-shadow var(--t-fast); }
+.input::placeholder { color: var(--text-3); }
 .input:focus { border-color: color-mix(in srgb, var(--accent) 60%, transparent); box-shadow: 0 0 0 3px var(--accent-soft); }
 select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   background-repeat: no-repeat; background-position: right 12px center; padding-right: 32px; }
-.input-row { display: flex; gap: 8px; }
+.input-row { display: flex; gap: 8px; align-items: center; }
+.input-row > .input { flex: 1; }
+.input-row > .btn { flex: none; height: 38px; padding: 0 12px; white-space: nowrap; }
+.input-row > .btn svg { width: 15px; height: 15px; }
+
 .range-line { display: flex; align-items: center; gap: 12px; }
 .range-line input[type="range"] { flex: 1; appearance: none; height: 5px; border-radius: 99px;
   background: linear-gradient(90deg, var(--accent) var(--v, 50%), rgba(255,255,255,.1) var(--v, 50%)); outline: none; }
@@ -192,24 +233,42 @@ select.input { appearance: none; background-image: url("data:image/svg+xml,%3Csv
   background: #fff; border: 3px solid var(--accent); box-shadow: 0 0 12px var(--accent-glow); cursor: grab;
   transition: transform var(--t-fast) var(--ease-spring); }
 .range-line input[type="range"]::-webkit-slider-thumb:hover { transform: scale(1.25); }
-.range-val { font-size: 12.5px; font-weight: 650; min-width: 52px; text-align: right; color: var(--text-2); font-variant-numeric: tabular-nums; }
-.set-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 9px 0;
-  border-bottom: 1px solid rgba(255,255,255,.045); }
-.set-row:last-child { border-bottom: 0; }
+.range-val { font-size: 12.5px; font-weight: 650; min-width: 62px; text-align: right; color: var(--text-2);
+  font-variant-numeric: tabular-nums; }
+
+/* a labelled switch row */
+.set-row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .set-row .sr-txt { min-width: 0; }
 .set-row .sr-txt b { display: block; font-size: 13px; font-weight: 600; }
-.set-row .sr-txt span { font-size: 11.5px; color: var(--text-3); display: block; margin-top: 2px; line-height: 1.5; }
-.cap { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700; padding: 3px 9px; border-radius: 99px; }
+.set-row .sr-txt span { font-size: 11.5px; color: var(--text-3); display: block; margin-top: 3px; line-height: 1.55; }
+.set-row + .set-row { padding-top: 14px; border-top: 1px solid rgba(255,255,255,.045); }
+
+.cap-row { display: flex; gap: 7px; flex-wrap: wrap; }
+.cap { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700;
+  padding: 3px 9px; border-radius: 99px; }
 .cap.ok { color: var(--ok); background: rgba(52,211,153,.1); border: 1px solid rgba(52,211,153,.3); }
+.cap.warn { color: var(--warn); background: rgba(251,191,36,.09); border: 1px solid rgba(251,191,36,.28); }
 .cap.bad { color: var(--danger); background: rgba(251,113,133,.08); border: 1px solid rgba(251,113,133,.28); }
 .cap .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
 .swatches { display: flex; gap: 9px; }
 .swatch { width: 34px; height: 34px; border-radius: 11px; border: 2px solid transparent; position: relative;
   transition: transform var(--t-med) var(--ease-spring), box-shadow var(--t-med); }
 .swatch:hover { transform: translateY(-3px) scale(1.08); }
 .swatch.on { border-color: #fff; box-shadow: 0 0 0 3px rgba(255,255,255,.14), 0 8px 22px -8px var(--sw-c); }
-.swatch.on::after { content: ""; position: absolute; inset: 0; margin: auto; width: 10px; height: 10px; border-radius: 50%;
-  background: #fff; box-shadow: 0 0 8px rgba(0,0,0,.4); }
+.swatch.on::after { content: ""; position: absolute; inset: 0; margin: auto; width: 10px; height: 10px;
+  border-radius: 50%; background: #fff; box-shadow: 0 0 8px rgba(0,0,0,.4); }
+
+/* runtime table */
+.kv-list { display: flex; flex-direction: column; }
+
+/* the "Saved" flash lives once, in the page header */
+.save-chip { display: inline-flex; align-items: center; gap: 7px; height: 30px; padding: 0 12px;
+  border-radius: 99px; font-size: 11.5px; font-weight: 650; color: var(--ok);
+  background: rgba(52,211,153,.1); border: 1px solid rgba(52,211,153,.3);
+  opacity: 0; transform: translateY(-3px); transition: opacity var(--t-fast), transform var(--t-fast); }
+.save-chip.on { opacity: 1; transform: none; }
+.save-chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); }
 .eng-grid { display: grid; gap: 4px; }
 
 /* ── media results grid (image & video verticals) ─────────────────────────── */

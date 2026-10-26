@@ -25,11 +25,57 @@ any OS  → python run.py --no-open   (browser mode at http://127.0.0.1:8765)
 | `.m3u8` / `.mpd` manifests | The master is fetched and **parsed locally**: every variant/representation becomes a selectable rung (height + bitrate, real rep-ids for DASH). Chosen rung → yt-dlp (muxes the separate audio track!); no yt-dlp → FFmpeg `-c copy` on exactly that variant playlist. |
 | Playlist / channel / tube-gallery pages | Extracted flat (`in_playlist`): the **first entry** becomes the fully-analyzed card, the next 24 ride along under *"More from this playlist"* with per-entry Analyze / Download / Copy. Nothing gets silently truncated to one video. |
 | A page that *plays* a video | Deep-scan: `og:video`, `<video>/<source>`, file anchors, Apache *index-of* listings (with sizes) — and when a video URL surfaces, the app **re-analyzes that URL** one level deep and hands you its real card, not a candidate list. |
+| A page whose video lives in its **player config** — XVideos, XNXX, xHamster, TXXX, SpankBang, kt_player tubes, jwplayer/video.js, `__NEXT_DATA__`, JSON-LD | The document is de-escaped (`\/`, `\u002F`, `&amp;`) and mined for every media URL: `html5player.setVideoUrlHigh/Low/HLS`, `video_url` / `video_url_hd`, `sources:[{file:…}]`, escaped JSON, manifests. Ads, sprites and posters are scored out; the real files become **quality chips** (1080p / 720p / HLS), and the hosting page rides along as `Referer`. |
 | A magnet | Honestly identified; copy it to your torrent client. (This app doesn't fake P2P.) |
 
 Pages whose only video surface is a **cross-origin `<iframe>` player** are not dead
 ends either: the scan records every player-looking iframe as an `embed` candidate and
 the analyzer **hops into the best one** (files first, embeds second) before giving up.
+
+## When the extractor refuses — or lies about quality
+
+A tube site is three moving parts: the page, the player config embedded in it, and
+the CDN serving the file. yt-dlp knows the first two only while its extractor still
+matches the site; the day the site ships a new player, extraction returns
+*"Unable to extract…"* and a downloader that only trusts extractors dead-ends.
+All Video Downloader no longer has that dead end — and it needs no per-site code
+for it:
+
+* **Extractor refused** → the page is deep-scanned. If the player lists files you
+  get a complete **quality card** (marked *recovered after block*); if it links one
+  manifest, that ladder is served. The page is kept as `Referer`.
+* **Extractor lies about quality** (a 480p-only map on a site whose player offers
+  1080p) → the taller file from the player config wins, and the card says so
+  instead of pretending 480p is the ceiling.
+* **Bot walls** — Cloudflare *"Just a moment"*, `403` for anything that is not a
+  browser → every page fetch **and** every yt-dlp run retries with a real Chrome
+  TLS fingerprint (`curl_cffi`), and the direct-http worker hands the file to that
+  engine instead of failing. `GET /api/meta` reports whether impersonation is live;
+  Settings → System shows it.
+* **Unknown sites** → the same generic engine runs on *every* page. No site is
+  "unsupported"; at worst it is unnamed.
+
+Built-in recipes (`webfinder/core/sites.py`, ~75 sites, `GET /api/sites` lists them):
+tube sites (XVideos, XNXX, xHamster, TXXX, SpankBang, Pornhub, RedTube, YouPorn,
+Eporner, HQPorner, PornTrex, ThisVid, DrTuber, TNAFlix, JavHD, MissAV, Hanime…),
+mainstream (YouTube, Vimeo, Dailymotion, OK.ru, VK, Rumble, BitChute, Odysee,
+Twitch/Kick, X, Reddit, TikTok, Instagram, Facebook, Bilibili, Douyin, Youku, Weibo…)
+and Persian (Aparat, Namasha, Tamasha, Dideo, Telewebion, Varzesh3, FilmNet, Shad).
+
+### Adding a site without touching the engine
+
+```python
+# webfinder/core/sites.py
+_r("mynewtube", "MyNewTube", ("mynewtube.com", "mynewtube.net"), "kt_player")
+```
+
+`generic` is the default and usually needs nothing else: any media URL in the HTML —
+plain, escaped, inside JSON, inside a `<video>` tag — is already found. Pick a family
+(`html5player`, `kt_player`, `jwplayer`) when the site labels its qualities in a way
+worth keeping, or pass `patterns=(r"myPlayer\('([^']+)",)` for a shape the generic
+pass cannot see. For a site yt-dlp already supports a recipe is optional: it adds the
+friendly name and the page-based fallback. `python tools/recipe_probe.py <url>` shows
+which recipe matched and what the engine finds — the fastest way to debug a new site.
 
 Hotlink-guarded CDNs (a lot of file hosts and tube sites) get the hosting page sent as
 **Referer** automatically — analyze found the file on a page, the download inherits it.
@@ -56,7 +102,17 @@ Two causes, both handled structurally now:
    whole client ladder anonymously **on both paths** (analyzer and downloader,
    module and system-CLI), the error card names the cause (close Chrome fully, or
    prefer `firefox`/`edge`), and raw ANSI/`ERROR: ERROR:` noise is stripped from
-   every message shown. A refused extractor is also no longer a dead end: the page
+   every message shown. A failure is also **remembered for the session**: the DB
+   cannot become readable twice, so the app stops re-reading it (that is what
+   used to print the same `ERROR:` line for every single request) and goes
+   straight to the anonymous path instead. **Settings → Video & capture →
+   *Cookies file*** takes precedence over the browser for every engine — an
+   exported `cookies.txt` always reads — and the **Check cookies** button reads
+   the configured source locally (no network) to say exactly what is broken.
+   When the chosen browser cannot be read, the app **switches to another browser
+   on the same machine whose database does read** (Firefox never locks its own),
+   says so, and *Fix cookies* makes that permanent in one click. A refused
+   extractor is also no longer a dead end: the page
    gets scanned and if it links a `master.m3u8`/mp4, **that** becomes the card —
    quality ladder included, hosting page attached as Referer, with a green
    "recovered after block" note.
@@ -83,6 +139,11 @@ webfinder/
 ├─ config.py                ~/.avd/settings.json (+ one-shot migration)
 ├─ core/
 │  ├─ media.py              THE brain: sniff → ladder → yt-dlp matrix → plan_download
+│  ├─ cookies.py            cookies.txt vs browser source, failure memory, probe
+│  ├─ embed.py              de-escape + mine media URLs from player configs/JSON
+│  ├─ sites.py              declarative recipe table (~75 sites) + player families
+│  ├─ net.py                browser headers, bot-wall detection, TLS impersonation
+│  ├─ ytcli.py              system-yt-dlp bridge (cookies, impersonation, progress)
 │  ├─ filekind.py           URL→file-type taxonomy (the search-less descendant of dorks)
 │  ├─ downloader.py         job manager: http | hls | ytdlp workers
 │  ├─ ffmpeg_tools.py       capture_stream (variant-aware), probe
@@ -98,7 +159,15 @@ tools/test_desktop_contract.py
 ```bash
 python tools/test_video_core.py           # fixture-tested engine (no network)
 python tools/test_desktop_contract.py     # pywebview bridge hygiene
+python tools/test_cookies.py              # cookie source: file vs browser, failure memory
+python tools/recipe_probe.py <url>        # which recipe matches, what it finds (needs network)
 ```
+
+`test_video_core.py` covers the player-config engine with real-world-shaped
+fixtures: `html5player.setVideoUrlHigh/Low/HLS`, kt_player `video_url`/`_hd`,
+SpankBang `stream_data`, escaped `__NEXT_DATA__`, JSON-LD, jwplayer — plus ad and
+poster rejection, directory-listing-vs-quality disambiguation, the refused-extractor
+recovery card, the capped-map upgrade, and the 403 → yt-dlp hand-off.
 
 *GPL-3.0 (see LICENSE). Not affiliated with Google, FFmpeg or yt-dlp. Download what you
 have the right to download.*

@@ -24,11 +24,19 @@ from typing import Any, Callable, Optional
 import httpx
 
 from ..config import settings
-from . import filekind as fk
+from . import filekind as fk, net
 
 CHUNK = 256 * 1024
 TERMINAL = {"done", "error", "cancelled"}
 NETWORK_ERRORS = (httpx.TransportError, ConnectionError, OSError)
+
+
+class _NeedsYtdlp(Exception):
+    """The CDN refused a plain HTTP stream (hotlink guard / bot wall).
+
+    yt-dlp can retry the same URL with a browser TLS fingerprint and the page
+    as Referer, so the http worker hands the job over instead of failing.
+    """
 
 
 @dataclass
@@ -255,13 +263,31 @@ class DownloadManager:
     # Worker: plain HTTP download with Range resume
     # ------------------------------------------------------------------
     async def _run_http(self, job: DownloadJob) -> None:
+        try:
+            await self._http_stream(job)
+        except _NeedsYtdlp as exc:
+            if job.meta.get("_ytdlp_fallback"):
+                raise RuntimeError(f"{exc} — the CDN refuses non-browser clients") from None
+            # Second chance through yt-dlp: it speaks TLS impersonation and can
+            # carry the hosting page as Referer, which is exactly what these
+            # hotlink-guarded CDNs check.
+            job.meta["_ytdlp_fallback"] = True
+            job.meta.setdefault("format", "bv*+ba/b")
+            job.kind = "ytdlp"
+            await asyncio.to_thread(self._ytdlp_thread, job)
+
+    async def _http_stream(self, job: DownloadJob) -> None:
         dest = Path(str(job.filepath))
         offset = job.resume_offset if dest.exists() else 0
-        headers = {"Accept-Encoding": "identity",
-                   "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AVD/2.0"}
-        if job.meta.get("referer"):
-            # hotlink-guarded CDNs (a LOT of tube/file hosts) 403 without it
-            headers["Referer"] = job.meta["referer"]
+        # full browser header set: tube CDNs 403 a bare UA, hotlink guards need
+        # the hosting page as Referer
+        headers = net.browser_headers(job.meta.get("referer") or "")
+        headers.update({"Accept": "*/*", "Accept-Encoding": "identity",
+                        "Sec-Fetch-Dest": "video", "Sec-Fetch-Mode": "no-cors"})
+        # job-specific headers (e.g. the Instagram checker's CDN referer)
+        for k, v in (job.meta.get("headers") or {}).items():
+            if isinstance(k, str) and isinstance(v, str) and v:
+                headers[k] = v
         if offset:
             headers["Range"] = f"bytes={offset}-"
         mode = "ab" if offset else "wb"
@@ -275,6 +301,8 @@ class DownloadManager:
                     job.done = job.total = dest.stat().st_size  # already complete
                     job.progress_pct = 100.0
                     return
+                if resp.status_code in (401, 403, 406, 429) and not job.meta.get("_ytdlp_fallback"):
+                    raise _NeedsYtdlp(f"CDN answered HTTP {resp.status_code}")
                 resp.raise_for_status()
                 cr = resp.headers.get("content-range")
                 cl = resp.headers.get("content-length")
@@ -311,16 +339,21 @@ class DownloadManager:
         await ffmpeg_tools.capture_stream(job, self._check_flags, self.publish)
 
     # ------------------------------------------------------------------
-    # Worker: yt-dlp media download (runs in a thread — its API is sync)
-    # ------------------------------------------------------------------
     # Worker: yt-dlp via the USER's system binary (kept fresh outside pip —
     # the answer to "my terminal works, the app doesn't")
     # ------------------------------------------------------------------
     def _ytdlp_cli_thread(self, job: DownloadJob) -> None:
-        """Drive the user's own (fresher) yt-dlp binary as a subprocess."""
+        """Drive the user's own (fresher) yt-dlp binary as a subprocess.
+
+        Two refusals get a second chance, because both are the *client's* fault,
+        not the user's:
+          1. Chrome's locked / App-Bound-encrypted cookie DB  → rerun anonymously.
+          2. A bot wall / 403 (TLS fingerprint check)          → rerun with
+             ``--impersonate`` when curl_cffi is installed.
+        """
         import subprocess as _sp
         from . import ytcli
-        d = ytcli.detect()
+
         parent = Path(str(job.filepath)).parent
         stem = Path(str(job.filename)).stem[:120] or "download"
         base_args = ytcli.download_cmd(
@@ -345,6 +378,7 @@ class DownloadManager:
                 line = raw.strip()
                 if line.startswith("AVDPROG "):
                     parts = line.split()[1:]
+
                     def _n(i: int) -> float:
                         try:
                             return float(parts[i]) if parts[i] not in ("NA", "") else 0.0
@@ -374,24 +408,41 @@ class DownloadManager:
             job._cli_proc = None
             return rc, tail
 
+        def stripped(args: list[str]) -> list[str]:
+            """Drop every cookie flag (a locked/encrypted DB cannot be retried)."""
+            from .cookies import strip_flags
+            return strip_flags(args)
+
         try:
             rc, tail = pump(base_args)
-            if rc not in (0, None) and not job._cancel.is_set():
+            if job._cancel.is_set():
+                raise asyncio.CancelledError()
+            if rc not in (0, None):
                 msg = ytcli.friendly(" · ".join(tail[-3:])) or f"exit {rc}"
-                if (ytcli._ERR_MARKERS.search(msg)
-                        and (settings.get("ytdlp_browser_cookies") or "").strip()):
-                    # cookie DB bricked the run — rerun WITHOUT the cookie flag
-                    b = str(settings.get("ytdlp_browser_cookies"))
-                    lean = [a for i2, a in enumerate(base_args)
-                            if a != "--cookies-from-browser" and not (i2 and base_args[i2 - 1] == "--cookies-from-browser" and a == b)]
-                    rc2, tail2 = pump(lean)
-                    if rc2 in (0, None):
+                # 1) cookie DB wall → same run, anonymous
+                if ytcli._ERR_MARKERS.search(msg) and ytcli._cookie_flags():
+                    # remember the broken source: every later job skips it instead
+                    # of paying the same timeout and printing the same error again
+                    from . import cookies as cookie_state
+                    cookie_state.mark_browser_failure(msg)
+                    rc2, tail2 = pump(stripped(base_args))
+                    if rc2 in (0, None) or self._settle_ytdlp_file(job, parent, stem):
                         self._settle_ytdlp_file(job, parent, stem)
                         return
                     msg = f"{msg} · cookieless retry: {ytcli.friendly(' · '.join(tail2[-3:])) or f'exit {rc2}'}"
+                # 2) bot wall / 403 → same run, real browser TLS fingerprint
+                if (ytcli.looks_blocked(msg) and "--impersonate" not in base_args
+                        and ytcli.impersonation_available()):
+                    imp = stripped(base_args)[:-1] + ytcli.impersonate_flags() + [base_args[-1]]
+                    rc3, tail3 = pump(imp)
+                    if rc3 in (0, None) or self._settle_ytdlp_file(job, parent, stem):
+                        self._settle_ytdlp_file(job, parent, stem)
+                        return
+                    msg = (f"{msg} · impersonated retry: "
+                           f"{ytcli.friendly(' · '.join(tail3[-3:])) or f'exit {rc3}'}")
+                if self._settle_ytdlp_file(job, parent, stem):
+                    return
                 raise RuntimeError(f"[system yt-dlp] {msg[:320]}")
-            if job._cancel.is_set():
-                raise asyncio.CancelledError()
             self._settle_ytdlp_file(job, parent, stem)
         finally:
             p2 = getattr(job, "_cli_proc", None)
@@ -401,98 +452,6 @@ class DownloadManager:
                 except OSError:
                     pass
                 job._cli_proc = None
-
-    # ------------------------------------------------------------------
-    # Worker: yt-dlp media download (runs in a thread — its API is sync)
-    # ------------------------------------------------------------------
-    # Worker: yt-dlp via the USER's system binary (kept fresh outside pip —
-    # the answer to "my terminal works, the app doesn't")
-    # ------------------------------------------------------------------
-    def _ytdlp_cli_thread(self, job: DownloadJob) -> None:
-        import subprocess as _sp
-        from . import ytcli
-        d = ytcli.detect()
-        parent = Path(str(job.filepath)).parent
-        stem = Path(str(job.filename)).stem[:120] or "download"
-        args = ytcli.download_cmd(
-            job.url, outdir=str(parent), outstem=stem,
-            fmt=job.meta.get("format") or "bv*+ba/b",
-            container=settings.get("default_container", "mp4"),
-            referer=(job.meta.get("referer") or "").strip(),
-            client=(job.meta.get("extractor_args") or {}).get("youtube"),
-            playlist=bool(job.meta.get("playlist")))
-        try:
-            proc = _sp.Popen(args, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
-                             encoding="utf-8", errors="ignore")
-        except OSError as exc:
-            raise RuntimeError(f"system yt-dlp could not run: {exc}") from None
-        job._cli_proc = proc
-        assert proc.stdout is not None
-        tail: list[str] = []
-        last = time.time()
-        for raw in proc.stdout:
-            line = raw.strip()
-            if line.startswith("AVDPROG "):
-                parts = line.split()[1:]
-                def _n(i: int) -> float:
-                    try:
-                        return float(parts[i]) if parts[i] not in ("NA", "") else 0.0
-                    except (IndexError, ValueError):
-                        return 0.0
-                try:
-                    pct = float(parts[0].strip("% "))
-                except (IndexError, ValueError):
-                    pct = 0.0
-                done, total, speed = _n(1), _n(2) or _n(3), _n(4)
-                if total:
-                    job.set_progress(int(done), int(total), speed or None)
-                if pct:
-                    job.progress_pct = pct
-                if speed:
-                    job.speed = speed
-                if time.time() - last >= 0.25:
-                    last = time.time()
-                    self.publish(job)
-            elif line:
-                tail.append(line)
-                del tail[:-8]
-            if job._cancel.is_set():
-                proc.terminate()
-                break
-        rc = proc.wait()
-        if job._cancel.is_set():
-            raise asyncio.CancelledError()
-        if rc not in (0, None):
-            msg = ytcli.friendly(" · ".join(tail[-3:])) or f"exit {rc}"
-            if (ytcli._ERR_MARKERS.search(msg)
-                    and (settings.get("ytdlp_browser_cookies") or "").strip()):
-                # retry the WHOLE run without the cookie flag, then report honestly
-                lean = [a for a in args if a not in ("--cookies-from-browser",
-                                                      str(settings.get("ytdlp_browser_cookies")))]
-                last = None
-                for _ in range(1):
-                    try:
-                        p2 = _sp.Popen(lean, stdout=_sp.PIPE, stderr=_sp.STDOUT, text=True,
-                                       encoding="utf-8", errors="ignore")
-                        job._cli_proc = p2
-                        for raw in p2.stdout:
-                            line = raw.strip()
-                            if line.startswith("AVDPROG ") and "%" not in line:
-                                pass
-                            if line and not line.startswith("AVDPROG"):
-                                tail.append(line)
-                                del tail[-8:]
-                        rc2 = p2.wait()
-                        if rc2 in (0, None) or self._settle_ytdlp_file(job, parent, stem):
-                            self._settle_ytdlp_file(job, parent, stem)
-                            return
-                        last = ytcli.friendly(" · ".join(tail[-3:])) or f"exit {rc2}"
-                    except OSError as exc2:
-                        last = str(exc2)
-                msg = f"cookieless retry also failed: {last or msg}"
-            raise RuntimeError(f"[system yt-dlp] {msg[:300]}")
-        self._settle_ytdlp_file(job, parent, stem)
-
 
     # ------------------------------------------------------------------
     async def _run_ytdlp(self, job: DownloadJob) -> None:
@@ -584,9 +543,19 @@ class DownloadManager:
                 # Chrome holds/app-bound-encrypts its cookie DB (yt-dlp #7271):
                 # NEVER let that brick a download — rerun every client pass
                 # anonymously, exactly like the analyzer learned to do.
-                anon = [{**o, "cookiesfrombrowser": None} for o in attempts]
+                from . import cookies as cookie_state
+                cookie_state.mark_browser_failure(blob)
+                anon = [{**o, "cookiesfrombrowser": None, "cookiefile": None} for o in attempts]
                 last_err = None
                 if run_pass(anon):
+                    return
+                blob = friendly(str(last_err or blob))
+            # bot wall / 403: one pass with a real browser TLS fingerprint
+            if (ytcli.looks_blocked(blob) and ytcli.impersonation_available()
+                    and not any("impersonate" in o for o in attempts)):
+                target = ytcli.impersonate_target()
+                last_err = None
+                if target is not None and run_pass([{**attempts[0], "impersonate": target}]):
                     return
                 blob = friendly(str(last_err or blob))
             # attempts may still have produced a complete file

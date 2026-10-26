@@ -104,11 +104,16 @@
 
       <!-- =============== SETTINGS =============== -->
       <section class="view" id="view-settings" data-title="Settings">
-        <div class="page-head">
-          <h1 class="page-title">Settings</h1>
-          <p class="page-sub">Everything is persisted to <code id="cfg-path">~/.avd/settings.json</code>.</p>
+        <div class="page-head head-inline">
+          <div>
+            <h1 class="page-title">Settings</h1>
+            <p class="page-sub">Every change saves itself to <code id="cfg-path">~/.avd/settings.json</code>.</p>
+          </div>
+          <div class="head-actions">
+            <span class="save-chip" id="set-saved"><span class="dot"></span>Saved</span>
+          </div>
         </div>
-        <div class="settings-grid" id="settings-grid"><!-- sections injected --></div>
+        <div class="settings-grid" id="settings-grid"><!-- cards injected --></div>
       </section>
     </main>
   </div>

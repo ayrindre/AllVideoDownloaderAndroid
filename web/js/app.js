@@ -125,7 +125,7 @@
     $("#btn-exit").innerHTML = `${ICONS.svg("exit")}<span>Exit</span>`;
     $("#btn-exit").addEventListener("click", exitApp);
     addEventListener("keydown", (e) => {
-      if ((e.ctrlKey || e.metaKey) && "123".includes(e.key)) {
+      if ((e.ctrlKey || e.metaKey) && /^[1-9]$/.test(e.key) && NAV[+e.key - 1]) {
         e.preventDefault();
         showView(NAV[+e.key - 1].view);
       }

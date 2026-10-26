@@ -111,7 +111,7 @@ def main() -> None:
                 import subprocess as _sp
                 r = _sp.run([sys.executable, "-m", "pip", "install", "-U", "--quiet",
                              "--disable-pip-version-check", "yt-dlp"],
-                            capture_output=True, text=True, timeout=240)
+                            capture_output=True, text=True, timeout=300)
                 if r.returncode == 0:
                     stamp.touch()
                     print("[avd] yt-dlp refreshed — restart the app to load the new version.")

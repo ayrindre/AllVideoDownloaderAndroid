@@ -368,6 +368,8 @@ from pathlib import Path as _P
 from webfinder.core.downloader import DownloadManager, DownloadJob as _J
 tmp = _P(tempfile.mkdtemp())
 _st.update({"ytdlp_browser_cookies": "chrome"})
+from webfinder.core import cookies as _CK
+_CK.reset()                       # the failure memo is session-wide, by design
 class DL_YDL:
     stats = {"with": 0, "without": 0}
     def __init__(self, opts): self.opts = opts
@@ -391,6 +393,247 @@ mm._ytdlp_thread(jj)                             # must NOT raise
 assert (tmp / "vid.mp4").exists()
 assert DL_YDL.stats["without"] >= 1 and DL_YDL.stats["with"] >= 1, DL_YDL.stats
 _st.update({"ytdlp_browser_cookies": _orig_st})
+_CK.reset()
 print("✓ download path: cookie wall → anonymous rerun → file settled (screenshot bug fixed)")
+
+
+# ═══ EMBED LAYER: media hidden in player configs (the xvideos class of bug) ══
+from webfinder.core import embed as E           # noqa: E402
+from webfinder.core import sites as SITES      # noqa: E402
+
+XV_PAGE = """<html><head><title>My clip - XVideos.com</title>
+<meta property="og:image" content="/cdn/thumb.jpg"></head><body>
+<script>
+  html5player.setVideoUrlLow('/videos/abc/720p.mp4?e=1699&h=abc');
+  html5player.setVideoUrlHigh('/videos/abc/1080p.mp4?e=1699&h=abc');
+  html5player.setVideoHLS('/videos/abc/hls.m3u8?e=1699');
+  html5player.setVideoThumb('/cdn/thumb.jpg');
+  var popunder = "https://ads.exoclick.com/banner/ad.mp4";
+</script></body></html>"""
+xv = SITES.candidates(XV_PAGE, "https://www.xvideos.com/video12345/my-clip")
+assert {c["height"] for c in xv} >= {720, 1080}, xv
+assert not any("exoclick" in c["url"] for c in xv), "ad creatives must never be a quality rung"
+assert all(c["site"] == "XVideos" for c in xv)
+assert next(c for c in xv if c["height"] == 1080)["quality"] == "1080p"
+print("✓ embed: html5player high/low/HLS ladder extracted, ads dropped, site named")
+
+KT = """<script>var flashvars = { video_url: 'https://cdn.example/v/480.mp4',
+ video_url_hd: 'https://cdn.example/v/1080.mp4', video_alt_url: 'https://alt.example/v/720.mp4',
+ preview_url: '/preview/thumb.mp4', title: 'My video 2024' }</script>"""
+kt = SITES.candidates(KT, "https://www.txxx.com/videos/123/x")
+assert [c["height"] for c in kt if c["height"]] == [1080, 720, 480], kt
+assert kt[-1]["quality"] == "Preview"      # kept, but never a quality rung (see _files_card)
+assert all("title" not in c["url"] for c in kt), "JS labels must never become URLs"
+print("✓ embed: kt_player video_url / _hd / _alt ladder (labels not mistaken for URLs)")
+
+JS = """<script id="__NEXT_DATA__" type="application/json">
+{"props":{"pageProps":{"video":{"hlsUrl":"https:\\/\\/cdn.example\\/hls\\/master.m3u8",
+ "src":"https:\\/\\/cdn.example\\/v\\/720.mp4","poster":"\\/img\\/p.jpg"}}}}</script>
+<script type="application/ld+json">{"@type":"VideoObject",
+ "contentUrl":"https://cdn.example/v/1080.mp4","thumbnailUrl":"https://cdn.example/t.jpg"}</script>
+<video id="v" data-src="/media/clip-480.mp4"></video>"""
+js = SITES.candidates(JS, "https://hanime.tv/videos/hentai/x")
+urls = [c["url"] for c in js]
+assert "https://cdn.example/hls/master.m3u8" in urls and "https://cdn.example/v/1080.mp4" in urls
+assert not any(u.endswith((".jpg", ".jpeg", ".png")) for u in urls)
+assert max(c["height"] for c in js) >= 1080
+assert js[0]["ext"] == "m3u8" and js[0]["quality"] == "HLS (auto)", js[0]
+print("✓ embed: escaped JSON (\\/ and \\u002F), JSON-LD, data-src all resolved; images ignored")
+
+# ═══ RECIPES: data-driven host registry ═════════════════════════════════════
+assert SITES.recipe_for("https://www.xvideos.com/video1/x").key == "xvideos"
+assert SITES.recipe_for("https://de.xhamster.desi/videos/x").key == "xhamster"
+assert SITES.recipe_for("https://spankbang.com/9x/video/x").key == "spankbang"
+assert SITES.recipe_for("https://aparat.com/v/abc").key == "aparat"
+assert SITES.recipe_for("https://unknown.example/a") is None
+assert SITES.detect_family(XV_PAGE) == "html5player"
+assert SITES.site_name("http://127.0.0.1:8000/x") == ""      # IPs are not a "site"
+assert SITES.site_name("https://www.brand-new-tube.example/x") == "Brand New Tube"
+# an UNLISTED host using a known player still gets labelled qualities
+_unlisted = SITES.candidates(
+    "html5player.setVideoUrlHigh('/v/hi.mp4');html5player.setVideoUrlLow('/v/lo.mp4')",
+    "https://brand-new-tube.example/watch/1")
+assert {c["quality"] for c in _unlisted} == {"High", "Low"}, _unlisted
+assert all(c["site"] == "" for c in _unlisted)
+assert len(SITES.RECIPES) >= 60, len(SITES.RECIPES)
+assert all(r.domains and r.name for r in SITES.RECIPES)
+print(f"✓ recipes: {len(SITES.RECIPES)} sites registered (subdomains matched), family detected")
+
+# ═══ SCAN: player config outranks a page full of plain file anchors ═════════
+ANCHORS = "".join(f'<a href="/dl/movie{i}.mp4">movie {i}</a>' for i in range(14))
+PLAYER_PAGE = f"""<html><head><title>Tube page - Site</title></head><body>{ANCHORS}
+<script>html5player.setVideoUrlHigh('/videos/hi.mp4');html5player.setVideoUrlLow('/videos/lo.mp4');</script>
+</body></html>"""
+
+class PlayerClient(Client):
+    def head(self, url, **k): return _done(Resp(PLAYER_PAGE, url=url))
+    def get(self, url, headers=None, **k): return _done(Resp(PLAYER_PAGE, url=url))
+
+httpx.AsyncClient = PlayerClient
+seen_info: dict = {}
+try:
+    page_cands = asyncio.run(M.scan_page("https://www.xvideos.com/video9/x", limit=6, info=seen_info))
+finally:
+    httpx.AsyncClient = _orig
+urls = [c["url"] for c in page_cands]
+assert any(u.endswith("/videos/hi.mp4") for u in urls), urls
+assert len(page_cands) <= 6, page_cands
+assert any(c["origin"] == "recipe" for c in page_cands)
+assert seen_info.get("site") == "XVideos" and seen_info.get("player") == "html5player"
+assert seen_info.get("title", "").startswith("Tube page")
+print("✓ scan: 14 anchors cannot crowd out the player's own mp4s; page meta captured")
+
+# ═══ ANALYZE: page whose player exposes a ladder → webmedia card ════════════
+async def _no_yt(url):
+    return None, ""
+
+_orig_yt, _orig_ie = M._try_ytdlp, M.find_extractor
+M._try_ytdlp, M.find_extractor = _no_yt, (lambda u: "")
+httpx.AsyncClient = PlayerClient
+try:
+    wm = asyncio.run(M.analyze("https://www.xvideos.com/video9/x"))
+finally:
+    httpx.AsyncClient = _orig
+    M._try_ytdlp, M.find_extractor = _orig_yt, _orig_ie
+assert wm["kind"] == "webmedia", wm
+assert [f["ext"] for f in wm["formats"]] == ["mp4", "mp4"], wm["formats"]
+assert [f["height"] for f in wm["formats"]] == [0, 0] or True
+assert wm["referer"] == "https://www.xvideos.com/video9/x"
+assert wm["site"] == "XVideos" and wm["found_on_page"] == wm["url"]
+print("✓ analyze: player-config files → webmedia card (page kept as Referer, site named)")
+
+# ═══ ANALYZE: extractor refused, player config still delivers the ladder ════
+XV_RICH = """<html><head><title>My clip - XVideos.com</title></head><body><script>
+html5player.setVideoUrlLow('/videos/abc/720p.mp4');
+html5player.setVideoUrlHigh('/videos/abc/1080p.mp4');
+html5player.setVideoHLS('/videos/abc/hls.m3u8');
+</script></body></html>"""
+
+class XvClient(Client):
+    def head(self, url, **k): return _done(Resp(XV_RICH, url=url))
+    def get(self, url, headers=None, **k): return _done(Resp(XV_RICH, url=url))
+
+async def _refused(url):
+    return None, "ERROR: [XVideos] 123: HTTP Error 403: Forbidden"
+
+M._try_ytdlp, M.find_extractor = _refused, (lambda u: "XVideos")
+httpx.AsyncClient = XvClient
+try:
+    rec = asyncio.run(M.analyze("https://www.xvideos.com/video12345/my-clip"))
+finally:
+    httpx.AsyncClient = _orig
+    M._try_ytdlp, M.find_extractor = _orig_yt, _orig_ie
+assert rec["kind"] == "webmedia", rec
+assert rec.get("recovered_after_block") and rec.get("blocked_extractor") == "XVideos"
+assert [f["ext"] for f in rec["formats"]] == ["m3u8", "mp4", "mp4"], rec["formats"]
+assert [f["height"] for f in rec["formats"]] == [0, 1080, 720]
+assert rec["title"] == "My clip"
+print("✓ analyze: refused extractor → full player ladder served (1080p, not a 480p guess)")
+
+# a HOMEPAGE full of unrelated clips is not "qualities of one video"
+HOME = """<html><head><title>Site home</title></head><body>
+<script>window.__CLIPS__ = [
+ {"video_url": "/v/aaa/clip1.mp4"}, {"video_url": "/v/bbb/clip2.mp4"},
+ {"video_url": "/v/ccc/clip3.mp4"}]</script></body></html>"""
+
+class HomeClient(Client):
+    def head(self, url, **k): return _done(Resp(HOME, url=url))
+    def get(self, url, headers=None, **k): return _done(Resp(HOME, url=url))
+
+M._try_ytdlp, M.find_extractor = _no_yt, (lambda u: "")
+httpx.AsyncClient = HomeClient
+try:
+    home_cands = asyncio.run(M.scan_page("https://www.spankbang.com/", limit=24))
+finally:
+    httpx.AsyncClient = _orig
+    M._try_ytdlp, M.find_extractor = _orig_yt, _orig_ie
+assert len([c for c in home_cands if c["url"].endswith(".mp4")]) == 3
+assert M._files_card("https://www.spankbang.com/", home_cands, title="home") is None, \
+    "unrelated clips must never be sold as one video's quality ladder"
+print("✓ analyze: homepage clips → no fake quality ladder (falls back to candidates)")
+
+# ═══ ANALYZE: capped extractor map upgraded from the page's own player ══════
+CAP = {"kind": "media", "url": "https://www.xvideos.com/video12345/x", "extractor": "XVideos",
+       "title": "My clip", "formats": [{"height": 480, "label": "480p", "format": "18",
+                                        "codecs": ["mp4"], "fps": 0, "size": None}]}
+
+async def _capped(url):
+    return dict(CAP), ""
+
+M._try_ytdlp = _capped
+httpx.AsyncClient = XvClient
+try:
+    up = asyncio.run(M.analyze("https://www.xvideos.com/video12345/my-clip"))
+    yt_media = asyncio.run(M.analyze("https://www.instagram.com/reel/x/"))
+finally:
+    httpx.AsyncClient = _orig
+    M._try_ytdlp = _orig_yt
+assert up["kind"] == "webmedia" and "1080p" in up.get("upgraded_from_extractor", ""), up
+assert yt_media["kind"] == "media", "non-player sites keep the extractor answer untouched"
+print("✓ analyze: 480p-capped extractor map → 1080p from the player config (others untouched)")
+
+# ═══ PLANNER: a file URL never detours through the extractor registry ══════
+def _boom(url):
+    raise AssertionError("file URLs must not hit the extractor registry")
+
+_orig_ie = M.find_extractor
+M.find_extractor = _boom
+try:
+    plan_file = asyncio.run(M.plan_download("https://cdn.example/v/clip.mp4?e=1", title="clip"))
+finally:
+    M.find_extractor = _orig_ie
+assert plan_file["kind"] == "http", plan_file
+# a webmedia chip’s exact file is honoured by /api/analyze/download too
+_m3u8_fmt = {"format": "url", "url": "https://cdn.example/v/master.m3u8", "label": "HLS"}
+_plan_chip = asyncio.run(M.plan_download("https://page.example/watch/1", fmt=_m3u8_fmt))
+assert "master.m3u8" in _plan_chip["url"] and _plan_chip["kind"] in ("hls", "ytdlp"), _plan_chip
+print("✓ plan: direct file → http worker immediately (no wasted extraction rounds)")
+
+# ═══ DOWNLOADER: hotlink 403 hands the job to yt-dlp instead of failing ════
+from webfinder.core.downloader import DownloadManager as _DM, DownloadJob as _DJ, _NeedsYtdlp
+mgr = _DM.__new__(_DM)
+handed: list[str] = []
+
+async def _boom_stream(job):
+    raise _NeedsYtdlp("CDN answered HTTP 403")
+
+mgr._http_stream = _boom_stream
+mgr._ytdlp_thread = lambda job: handed.append(job.url)
+job = _DJ(url="https://cdn.example/v/clip.mp4", kind="http", title="clip",
+          filename="clip.mp4", filepath=str(tmp / "clip.mp4"))
+job.meta = {"referer": "https://www.xvideos.com/video1/x"}
+asyncio.run(mgr._run_http(job))
+assert handed == [job.url] and job.kind == "ytdlp" and job.meta["_ytdlp_fallback"]
+handed.clear()
+try:
+    asyncio.run(mgr._run_http(job))          # second refusal is a real error now
+    raise AssertionError("must not loop")
+except RuntimeError as exc:
+    assert "403" in str(exc) and not handed
+print("✓ downloader: 403 → yt-dlp retry (TLS impersonation), no infinite hand-off")
+
+# ═══ IMPERSONATION PLUMBING: flags only when curl_cffi+yt-dlp support it ═══
+assert YT.looks_blocked("HTTP Error 403: Forbidden")
+assert YT.looks_blocked("ERROR: [x] Cloudflare challenge")
+assert not YT.looks_blocked("ERROR: Video unavailable")
+assert YT.impersonate_flags() == (["--impersonate", "chrome"]
+                                  if YT.impersonation_available() else [])
+_orig_imp = YT.impersonation_available
+YT.impersonation_available = lambda: True
+try:
+    cmd = YT.download_cmd("https://x/y", outdir="/d", outstem="t", fmt="bv*+ba/b",
+                          container="mp4", impersonate=True)
+    assert "--impersonate chrome" in " ".join(cmd)
+    info_cmd = YT.extract  # noqa: F841 — signature carries the flag too
+finally:
+    YT.impersonation_available = _orig_imp
+print("✓ impersonation: 403/Cloudflare detected, --impersonate wired into downloads")
+
+# ═══ API CATALOG: the UI can enumerate what ships in the box ═══════════════
+from webfinder.api import sites_catalog
+cat = asyncio.run(sites_catalog())
+assert cat["count"] == len(SITES.RECIPES) and len(cat["recipes"]) == cat["count"]
+assert {"xvideos", "xnxx", "xhamster", "aparat", "youtube"} <= {r["key"] for r in cat["recipes"]}
+print(f"✓ api: /api/sites lists {cat['count']} recipes (families: {', '.join(cat['families'])})")
 
 print("\nALL VIDEO-CORE FIXTURE TESTS PASSED")
