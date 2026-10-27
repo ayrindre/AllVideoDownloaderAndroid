@@ -1,0 +1,345 @@
+"""All Video Downloader — one answer to "which cookies does this run use?".
+
+Two sources, in this order:
+
+1. **A cookies.txt file** (Settings → Video & capture → *Cookies file*). This is
+   the reliable path: a browser can keep its database locked or App-Bound
+   encrypted (Chrome 127+ on Windows, yt-dlp issue #7271), while an exported
+   Netscape cookie file always reads.
+2. **A browser profile** (chrome/edge/firefox/…), read by yt-dlp.
+
+A browser read that fails once is remembered for the whole session. That matters:
+the failure mode is "the file is locked", which repeats identically for every
+request, so without this the log fills with the same ERROR line for every single
+extraction and download attempt. Once we know the DB is unreadable we go
+straight to the anonymous path and tell the user exactly what to fix.
+"""
+from __future__ import annotations
+
+import re
+import threading
+from pathlib import Path
+
+from ..config import settings
+from ..platform import runtime
+
+# yt-dlp / gallery-dl / our own wording for "the cookie source did not work"
+# (the gallery-dl pattern stays: it is the same locked-cookie-DB disease)
+_COOKIE_ERR = re.compile(
+    # the classic ones
+    r"could not copy|cookie database|app[- ]bound|permission denied.*cookie"
+    r"|cookie.*(?:locked|in use)"
+    # gallery-dl: "Unable to find Chrome cookies database in …"
+    r"|unable to find .{0,30}cookies database|unable to find .{0,20}cookies"
+    # "could not be decrypted" (App-Bound Encryption)
+    r"|cookies .{0,40}could not be decrypted|could not decrypt .{0,20}cookies"
+    r"|failed to decrypt with|dpapi"
+    # explicit read/load failures, but only when cookies are named
+    r"|(?:could not|unable to|failed to) (?:read|load|extract|decrypt) (?:the )?cookies?"
+    r"|cookies? (?:file (?:is )?(?:empty|invalid)|not found|is empty)"
+    r"|invalid netscape cookies\.txt",
+    re.I)
+
+# a message we never want to show twice: it is a *setup* problem, not a job error
+EXPLAIN = ("The browser's cookie database could not be read — Chrome holds it open while "
+           "running, and Chrome 127+ on Windows also App-Bound-encrypts it. Fully quit the "
+           "browser (tray icon too), pick Firefox, or export a cookies.txt and set "
+           "Settings → Video & capture → Cookies file. Until then the app runs logged out.")
+
+# Browsers we can read from, best-effort order. Firefox is first because its
+# cookie store is a plain SQLite file nobody locks — the one that survives the
+# Chrome wall on Windows.
+CANDIDATES = ("firefox", "edge", "brave", "chromium", "vivaldi", "opera", "chrome", "safari")
+
+_lock = threading.Lock()
+_browser_failure = ""          # first failure message in this process
+_alt_browser = None            # None = not scanned yet; "" = nothing readable
+_alt_meta: dict = {}
+
+
+# ---------------------------------------------------------------------------
+# Settings accessors
+# ---------------------------------------------------------------------------
+def browser() -> str:
+    """Configured browser name ('' = no browser source)."""
+    return str(settings.get("ytdlp_browser_cookies") or "").strip().lower()
+
+
+def cookie_file() -> str:
+    """Configured cookies.txt path, or '' when unset (existence is checked)."""
+    raw = str(settings.get("cookies_file") or "").strip().strip('"')
+    if not raw:
+        return ""
+    return str(Path(raw).expanduser())
+
+
+def file_usable() -> bool:
+    path = cookie_file()
+    return bool(path) and Path(path).is_file()
+
+
+def source() -> dict:
+    """What the engines would use right now — handy for the UI/meta payload."""
+    path = cookie_file()
+    failed = browser_failure()
+    active = active_browser()
+    return {
+        "browser": browser(),
+        "active_browser": active,
+        "file": path,
+        "file_ok": file_usable(),
+        "mode": "file" if file_usable() else ("browser" if active else ""),
+        "browser_failed": bool(failed),
+        "error": failed,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Session memory of a broken browser source
+# ---------------------------------------------------------------------------
+def browser_failure() -> str:
+    with _lock:
+        return _browser_failure
+
+
+def is_cookie_error(msg: str) -> bool:
+    return bool(_COOKIE_ERR.search(msg or ""))
+
+
+def mark_browser_failure(msg: str = "") -> bool:
+    """Remember that the browser DB is unreadable. True when it *was* that kind
+    of failure (so callers can retry anonymously instead of surfacing it).
+
+    Only called a failure when a browser source is actually in use: a site that
+    answers 401 is a login wall (Instagram, YouTube), not a broken cookie store,
+    and must not poison the session with "cookies unreadable".
+    """
+    global _browser_failure
+    if not browser() or not is_cookie_error(msg):
+        return False
+    with _lock:
+        if not _browser_failure:
+            _browser_failure = (msg or EXPLAIN).strip()[:300]
+    return True
+
+
+def reset() -> None:
+    """Forget the failure (settings changed / tests)."""
+    global _browser_failure, _alt_browser
+    with _lock:
+        _browser_failure = ""
+        _alt_browser = None
+        _alt_meta.clear()
+
+
+# ---------------------------------------------------------------------------
+# Flags for the two engines
+# ---------------------------------------------------------------------------
+def ytdlp_flags() -> list[str]:
+    """Extra CLI flags for the system yt-dlp binary."""
+    if file_usable():
+        return ["--cookies", cookie_file()]
+    name = active_browser()
+    return ["--cookies-from-browser", name] if name else []
+
+
+def module_opts() -> dict:
+    """Fragment for a ``yt_dlp.YoutubeDL`` options dict."""
+    if file_usable():
+        return {"cookiefile": cookie_file()}
+    name = active_browser()
+    return {"cookiesfrombrowser": (name,)} if name else {}
+
+
+_FLAG_WITH_VALUE = ("--cookies-from-browser", "--cookies", "--cookies-file")
+
+
+def strip_flags(args: list[str]) -> list[str]:
+    """Remove every cookie flag (and its value) — the anonymous retry."""
+    out: list[str] = []
+    skip = False
+    for a in args:
+        if skip:
+            skip = False
+            continue
+        if a in _FLAG_WITH_VALUE:
+            skip = True
+            continue
+        out.append(a)
+    return out
+
+
+def used_source() -> str:
+    """Human label of what a run actually uses (for logs / job meta)."""
+    if file_usable():
+        return f"cookies.txt ({Path(cookie_file()).name})"
+    if browser() and not browser_failure():
+        return f"{browser()} cookies"
+    if browser_failure():
+        alt = auto_browser()
+        return f"{alt} cookies (fallback)" if alt else "anonymous (browser cookies unreadable)"
+    return "anonymous"
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics — the "Check cookies" button
+# ---------------------------------------------------------------------------
+def count_netscape(path: str) -> int:
+    """Number of real cookie rows in a Netscape cookies.txt (0 = empty/invalid)."""
+    try:
+        text = Path(path).read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return 0
+    n = 0
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") and not line.startswith("#HttpOnly_"):
+            continue
+        if len(line.split("\t")) >= 7:
+            n += 1
+    return n
+
+
+def _read_browser(name: str) -> tuple[bool, int, str]:
+    """Read a browser's cookies *locally* (no network).
+
+    Returns ``(ok, cookie_count, message)`` and never raises — every failure
+    mode here is something the user can be told about.
+    """
+    if runtime.IS_ANDROID:
+        # Desktop browser profiles do not exist on Android. A Netscape
+        # cookies.txt placed in the app's external folder is the supported path.
+        return False, 0, ("Browser cookie import is not available on Android — "
+                          "export a cookies.txt and put it in the app folder.")
+    try:
+        from yt_dlp.cookies import extract_cookies_from_browser  # noqa: PLC0415
+    except Exception as exc:  # noqa: BLE001 — yt-dlp missing
+        return False, 0, f"yt-dlp is not available to read cookies ({exc})"
+    try:
+        jar = extract_cookies_from_browser(name)
+    except Exception as exc:  # noqa: BLE001 — every failure is a user-facing message
+        raw = str(exc) or exc.__class__.__name__
+        if is_cookie_error(raw):
+            return False, 0, EXPLAIN
+        if "could not find" in raw.lower() or "no such file" in raw.lower():
+            return False, 0, (f"{name} has no cookie database on this machine ({raw[:150]}) — "
+                              "is it installed and signed in?")
+        return False, 0, f"Could not read {name} cookies: {raw[:220]}"
+    n = len(jar)
+    if not n:
+        return False, 0, (f"{name} answered but returned no cookies — open {name}, log in to "
+                          "the site you need, then check again.")
+    return True, n, f"{n} cookies readable from {name}."
+
+
+def _probe_browser(name: str) -> tuple[bool, int, str]:
+    """_read_browser, and remember the failure of the *configured* source."""
+    ok, n, msg = _read_browser(name)
+    if not ok and is_cookie_error(msg):
+        mark_browser_failure(msg)
+    return ok, n, msg
+
+
+def scan_browsers(exclude: str = "") -> list[dict]:
+    """Every browser on this machine whose cookie database reads cleanly."""
+    found: list[dict] = []
+    for name in CANDIDATES:
+        if name == (exclude or "").lower():
+            continue
+        ok, n, _msg = _read_browser(name)
+        if ok:
+            found.append({"browser": name, "count": n})
+    found.sort(key=lambda b: -b["count"])
+    return found
+
+
+def auto_browser() -> str:
+    """A browser whose cookies *can* be read, used when the chosen one cannot.
+
+    Cached for the session: the answer only changes when the user changes
+    settings (``reset()``) — it never becomes readable mid-session on its own.
+    """
+    global _alt_browser
+    with _lock:
+        if _alt_browser is not None:
+            return _alt_browser
+    found = scan_browsers(exclude=browser())
+    name = found[0]["browser"] if found else ""
+    with _lock:
+        _alt_browser = name
+        _alt_meta.clear()
+        _alt_meta.update(found[0] if found else {})
+    return name
+
+
+def active_browser() -> str:
+    """The browser the engines should actually use right now ('' = none)."""
+    name = browser()
+    if not name:
+        return ""
+    if not browser_failure():
+        return name
+    return auto_browser()
+
+
+def probe() -> dict:
+    """Check whatever cookie source is configured. Never raises."""
+    path = cookie_file()
+    if path:
+        if not Path(path).is_file():
+            return {"ok": False, "mode": "file", "source": path, "count": 0,
+                    "message": f"Cookies file not found: {path}"}
+        n = count_netscape(path)
+        if not n:
+            return {"ok": False, "mode": "file", "source": path, "count": 0,
+                    "message": ("That file has no cookie rows — export it in Netscape/"
+                                "cookies.txt format (a “Get cookies.txt LOCALLY” style "
+                                "extension writes exactly that).")}
+        ok = True
+        return {"ok": ok, "mode": "file", "source": path, "count": n,
+                "message": f"{n} cookies loaded from {Path(path).name}."}
+    name = browser()
+    if not name:
+        alts = scan_browsers()
+        res = {"ok": False, "mode": "", "source": "", "count": 0,
+               "alternatives": alts, "suggest": alts[0]["browser"] if alts else "",
+               "message": ("No cookie source configured — every request runs logged out. "
+                           "Pick a browser above (Firefox is the most reliable) or point "
+                           "“Cookies file” at an exported cookies.txt.")}
+        if alts:
+            res["message"] += f" {alts[0]['browser']} is readable on this machine."
+        return res
+    ok, n, msg = _probe_browser(name)
+    if ok:
+        reset()          # the user fixed it (closed Chrome / logged in) — try again
+        return {"ok": True, "mode": "browser", "source": name, "count": n,
+                "alternatives": [], "suggest": "", "message": msg}
+    # the chosen browser cannot be read — who else has cookies on this machine?
+    alts = scan_browsers(exclude=name)
+    if alts:
+        best = alts[0]
+        msg += (f" {best['browser']} IS readable here ({best['count']} cookies) — "
+                "switching to it usually makes extraction work.")
+    return {"ok": False, "mode": "browser", "source": name, "count": 0,
+            "alternatives": alts, "suggest": alts[0]["browser"] if alts else "",
+            "message": msg}
+
+
+def use_best() -> dict:
+    """Save the best readable browser as the source — the one-click fix."""
+    alts = scan_browsers()
+    if not alts:
+        return {"ok": False, "browser": "", "count": 0,
+                "message": ("None of the browsers on this machine gave up readable cookies. "
+                            "Close the browser completely before the scan, or export a "
+                            "cookies.txt and set Settings → Video & capture → Cookies file.")}
+    best = alts[0]
+    settings.update({"ytdlp_browser_cookies": best["browser"]})
+    reset()
+    return {"ok": True, "browser": best["browser"], "count": best["count"],
+            "message": f"Using {best['browser']} cookies now ({best['count']} readable). Try the link again."}
+
+
+def explain(msg: str) -> str:
+    """Friendly replacement for a raw cookie failure, or '' if not ours."""
+    return EXPLAIN if is_cookie_error(msg) else ""
