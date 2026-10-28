@@ -88,17 +88,19 @@ jobs:
           PY
 
       # Speed up repeat builds; a missing/corrupt cache simply rebuilds.
+      # Cache only the stable, expensive downloads (Android SDK/NDK, Gradle).
+      # The project-local android/.buildozer holds the target Python venv whose
+      # pip state does not survive caching (BuildDependencyInstallError /
+      # "no matching distribution" failures), so it is rebuilt fresh every run.
       - name: Cache buildozer toolchain
         uses: actions/cache@v4
         with:
+          key: buildozer-${{ runner.os }}-p4a2026.5.9-v3-${{ hashFiles('android/buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-p4a2026.5.9-v3-
           path: |
             ~/.buildozer
-            android/.buildozer
             ~/.gradle
-          # v2: force a clean toolchain after a stale-cache build failure
-          key: buildozer-${{ runner.os }}-p4a2026.5.9-v2-${{ hashFiles('android/buildozer.spec') }}
-          restore-keys: |
-            buildozer-${{ runner.os }}-p4a2026.5.9-v2-
 
       - name: Build debug APK with buildozer
         working-directory: android
