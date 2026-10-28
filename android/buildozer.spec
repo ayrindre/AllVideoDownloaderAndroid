@@ -36,7 +36,8 @@ android.allow_backup = True
 # ── Permissions ─────────────────────────────────────────────────────────────
 # No storage permission: downloads live in app-specific external storage;
 # sharing goes through MediaStore (see avd/platform/runtime.py).
-android.permissions = INTERNET,ACCESS_NETWORK_STATE,WAKE_LOCK
+# WAKE_LOCK is added automatically by android.wakelock below.
+android.permissions = INTERNET,ACCESS_NETWORK_STATE
 android.wakelock = True
 
 # ── Receive shared links from other apps (browser / YouTube share sheet) ───

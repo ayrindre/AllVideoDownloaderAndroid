@@ -58,7 +58,8 @@ android/
 
 ```bash
 cd android
-pip install buildozer python-for-android==2026.5.9 "Cython>=3.0,<3.2"
+# buildozer 1.6.0 پین cython<3.0 دارد و با p4a جدید ناسازگار است؛ نسخه 1.5.0
+pip install "buildozer==1.5.0" "python-for-android==2026.5.9" "Cython>=3.0,<3.2"
 buildozer android debug      # خروجی: android/bin/AllVideoDownloader-3.0.0-arm64-v8a-debug.apk
 ```
 
