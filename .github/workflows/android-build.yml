@@ -95,13 +95,38 @@ jobs:
             ~/.buildozer
             android/.buildozer
             ~/.gradle
-          key: buildozer-${{ runner.os }}-p4a2026.5.9-${{ hashFiles('android/buildozer.spec') }}
+          # v2: force a clean toolchain after a stale-cache build failure
+          key: buildozer-${{ runner.os }}-p4a2026.5.9-v2-${{ hashFiles('android/buildozer.spec') }}
           restore-keys: |
-            buildozer-${{ runner.os }}-p4a2026.5.9-
+            buildozer-${{ runner.os }}-p4a2026.5.9-v2-
 
       - name: Build debug APK with buildozer
         working-directory: android
-        run: buildozer -v android debug
+        shell: bash
+        run: |
+          set -o pipefail
+          # Keep the full log on disk; on failure surface the relevant tail
+          # as workflow annotations (api.github.com exposes these even when
+          # the full log download host is unreachable).
+          if ! buildozer -v android debug 2>&1 | tee buildozer-build.log; then
+            echo "::group::buildozer failure tail"
+            tail -n 120 buildozer-build.log || true
+            echo "::endgroup::"
+            grep -E "(Error|ERROR|FAILURE|Exception|Traceback|failed to|No matching|Could not)" buildozer-build.log \
+              | tail -n 20 | while IFS= read -r line; do
+              echo "::error title=buildozer::${line:0:400}"
+            done
+            exit 1
+          fi
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildozer-build-log
+          path: android/buildozer-build.log
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Collect the APK
         id: apk
