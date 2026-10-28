@@ -257,3 +257,30 @@ jobs:
               link engine, bundled arm64-v8a FFmpeg/FFprobe and yt-dlp.
               Debug-signed APK for sideloading (minSdk 29)."
           fi
+
+      # Keep a copy of the built APK inside the branch itself. Runs only on
+      # pushes (not PR runs); pushes made with GITHUB_TOKEN never trigger new
+      # workflow runs, so this cannot recurse.
+      - name: Commit built APK back to the branch
+        if: github.event_name == 'push'
+        working-directory: android
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          APK=$(find bin -name "*.apk" -type f | head -1)
+          mkdir -p prebuilt
+          cp "$APK" prebuilt/AllVideoDownloader-3.0.0-arm64-v8a-debug.apk
+          (cd prebuilt && sha256sum AllVideoDownloader-3.0.0-arm64-v8a-debug.apk \
+            > SHA256SUMS.txt)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f prebuilt/AllVideoDownloader-3.0.0-arm64-v8a-debug.apk \
+                   prebuilt/SHA256SUMS.txt
+          if git diff --cached --quiet; then
+            echo "APK byte-identical to the committed one — nothing to do"
+            exit 0
+          fi
+          git commit -m "chore(android): publish built arm64-v8a APK (v3.0.0) [skip ci]"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:${GITHUB_REF_NAME}"

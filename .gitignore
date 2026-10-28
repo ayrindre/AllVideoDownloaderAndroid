@@ -20,4 +20,7 @@ android/build/
 android/bin/
 *.apk
 *.aab
+# the CI-built downloadable APK is intentionally committed on the branch
+!android/prebuilt/
+!android/prebuilt/*.apk
 .avd-mobile/
