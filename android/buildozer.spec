@@ -10,12 +10,14 @@ source.include_exts = py,png,jpg,kv,atlas,ttf,txt,json
 # must be pulled in explicitly instead of via include_exts.
 source.include_patterns = assets/fonts/*.ttf,assets/bin/arm64-v8a/ffmpeg,assets/bin/arm64-v8a/ffprobe
 version = 3.0.0
-requirements = python3,kivy,kivymd==1.2.0,pyjnius,android,httpx,Pillow,pycryptodome,yt-dlp,mutagen,websockets,arabic-reshaper,python-bidi,PyYAML,typing-extensions,charset-normalizer
+# p4a installs pip requirements with --no-deps, so every transitive
+# pure-Python dependency is listed explicitly. The httpx p4a recipe also
+# forgets anyio, hence it appears here in person.
+requirements = python3,kivy,kivymd==1.2.0,pyjnius,android,httpx,anyio,httpcore,h11,sniffio,certifi,idna,requests,urllib3,charset-normalizer,Pillow,pycryptodome,yt-dlp,mutagen,websockets,arabic-reshaper,python-bidi,PyYAML,typing-extensions
 
 # ── UI / orientation ───────────────────────────────────────────────────────
 orientation = portrait
 fullscreen = 0
-android.apptheme = "@android:style/Theme.Material.Light.NoActionBar"
 presplash.filename = src/presplash.png
 icon.filename = src/icon.png
 android.presplash_color = #0E1120

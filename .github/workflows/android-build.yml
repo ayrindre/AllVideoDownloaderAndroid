@@ -41,7 +41,7 @@ jobs:
 
   build-apk:
     name: Build APK (arm64-v8a)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     needs: engine-tests
     timeout-minutes: 90
     steps:
@@ -60,9 +60,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            git zip unzip autoconf libtool pkg-config \
-            zlib1g-dev libncurses5-dev libstdc++6 libtinfo5 \
-            cmake libffi-dev libssl-dev build-essential ccache
+            git zip unzip wget patch make \
+            autoconf automake autopoint libtool libltdl-dev pkg-config \
+            zlib1g-dev libstdc++6 \
+            cmake libffi-dev libssl-dev build-essential ccache lbzip2
 
       - name: Install buildozer + pinned python-for-android
         run: |
