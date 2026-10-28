@@ -112,6 +112,61 @@ jobs:
           ls -lh AllVideoDownloader-3.0.0-arm64-v8a-debug.apk
           echo "path=$APK" >> "$GITHUB_OUTPUT"
 
+      - name: Verify APK contents (manifest, FFmpeg, fonts, engine)
+        working-directory: android
+        run: |
+          set -e
+          APK=$(find bin -name "*.apk" -type f | head -1)
+          test -n "$APK"
+          python - "$APK" <<'PY'
+          import sys, zipfile, tarfile, tempfile, pathlib
+          apk = pathlib.Path(sys.argv[1])
+          assert zipfile.is_zipfile(apk), "APK is not a valid zip"
+          with zipfile.ZipFile(apk) as z:
+              bad = z.testzip()
+              assert bad is None, f"corrupt entry in APK: {bad}"
+              names = z.namelist()
+              # native arm64 libraries (python, SDL2, …)
+              assert any(n.startswith("lib/arm64-v8a/") for n in names), "no arm64 native libs"
+              assert "assets/private.tar" in names, "p4a private.tar missing"
+              with tempfile.TemporaryDirectory() as td:
+                  z.extract("assets/private.tar", td)
+                  with tarfile.open(pathlib.Path(td) / "assets/private.tar") as tar:
+                      members = tar.getnames()
+                      def must_have(needle):
+                          assert any(needle in m for m in members), f"missing in private.tar: {needle}"
+                      must_have("assets/bin/arm64-v8a/ffmpeg")
+                      must_have("assets/bin/arm64-v8a/ffprobe")
+                      must_have("assets/fonts/Vazirmatn-Regular.ttf")
+                      must_have("assets/fonts/Vazirmatn-Bold.ttf")
+                      must_have("main.py")
+                      must_have("avd/ui/app.py")
+                      must_have("avd/core/media.py")
+                      ff = [m for m in members if m.endswith("bin/arm64-v8a/ffmpeg")][0]
+                      f = tar.extractfile(ff)
+                      head = f.read(20)
+                      assert head[:4] == b"\x7fELF" and head[4] == 2, "ffmpeg not ELF64"
+                      assert int.from_bytes(head[18:20], "little") == 183, "ffmpeg not AArch64"
+                      print("private.tar entries checked:", len(members))
+          print("APK structure OK")
+          PY
+          # Manifest-level checks with the SDK's aapt
+          AAPT=$(find "$HOME/.buildozer" -type f -name aapt | head -1)
+          [ -z "$AAPT" ] && AAPT=$(find "$HOME/.buildozer" -type f -name aapt2 | head -1)
+          if [ -n "$AAPT" ]; then
+            "$AAPT" dump badging "$APK" > badging.txt 2>/dev/null || true
+            grep -q "package: name='ir.avd.allvideodownloader'" badging.txt
+            grep -q "sdkVersion:'29'" badging.txt
+            grep -q "native-code: 'arm64-v8a'" badging.txt
+            grep -q "android.permission.INTERNET" badging.txt
+            grep -q "android.permission.WAKE_LOCK" badging.txt
+            grep -q "android.intent.action.SEND" badging.txt
+            echo "manifest checks OK"
+            cat badging.txt | head -12
+          else
+            echo "::warning::aapt not found, skipped manifest checks"
+          fi
+
       - name: Upload APK as a workflow artifact
         uses: actions/upload-artifact@v4
         with:
