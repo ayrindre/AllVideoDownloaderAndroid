@@ -1,4 +1,5 @@
 .venv/
+.workvenv/
 __pycache__/
 *.pyc
 downloads/
@@ -8,6 +9,18 @@ build/obj/
 *.log
 .DS_Store
 webfinder.egg-info/
-# app-local auto-installed ffmpeg/ffprobe binaries
+# app-local auto-installed ffmpeg/ffmpeg binaries
 /bin/
 .wf-ytdlp-updated
+
+# ── Android / buildozer build artifacts (source binaries under
+#    android/src/assets/bin ARE committed on purpose) ──
+android/.buildozer/
+android/build/
+android/bin/
+*.apk
+*.aab
+# the CI-built downloadable APK is intentionally committed on the branch
+!android/prebuilt/
+!android/prebuilt/*.apk
+.avd-mobile/

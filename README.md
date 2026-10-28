@@ -242,5 +242,16 @@ SpankBang `stream_data`, escaped `__NEXT_DATA__`, JSON-LD, jwplayer — plus ad 
 poster rejection, directory-listing-vs-quality disambiguation, the refused-extractor
 recovery card, the capped-map upgrade, and the 403 → yt-dlp hand-off.
 
+## Android / mobile port (نسخه اندروید)
+
+A full mobile rewrite lives under [`android/`](android/README.md): the same
+universal link engine (yt-dlp, direct files, HLS/DASH, deep page scan, 384 site
+recipes) behind a new, phone-first KivyMD UI in Persian with bottom navigation,
+live download cards, theme/accent settings and share-sheet link intake. The
+Windows `ffmpeg.exe` auto-download is replaced by arm64 FFmpeg/FFprobe
+executables bundled inside the APK — see [`android/buildozer.spec`](android/buildozer.spec)
+and the `Android APK build` GitHub workflow. The debug-signed APK is published
+to the repository's releases page as `android-v3.0.0`.
+
 *GPL-3.0 (see LICENSE). Not affiliated with Google, FFmpeg or yt-dlp. Download what you
 have the right to download.*

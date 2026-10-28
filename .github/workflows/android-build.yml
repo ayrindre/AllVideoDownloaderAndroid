@@ -1,0 +1,288 @@
+name: Android APK build
+
+# Builds the KivyMD mobile port with python-for-android. The sandbox this
+# project is developed in has no JDK/Android SDK, so all packaging happens on
+# GitHub-hosted runners (full network access to dl.google.com, Maven, PyPI).
+on:
+  push:
+    branches:
+      - arena/f73e798f-allvideodownloaderandroid
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to publish the APK as a GitHub release
+
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  engine-tests:
+    name: Engine tests (offline, pure Python)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install engine dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install httpx yt-dlp arabic-reshaper python-bidi pillow pytest
+      - name: Run the desktop-engine fixture suite against the mobile engine
+        working-directory: android
+        env:
+          AVD_HOME: /tmp/avd-ci-home
+        run: |
+          for t in test_video_core test_coverage test_cookies test_engine_service; do
+            PYTHONPATH=src python tests/$t.py
+          done
+
+  build-apk:
+    name: Build APK (arm64-v8a)
+    runs-on: ubuntu-24.04
+    needs: engine-tests
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: System packages required by python-for-android
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git zip unzip wget patch make \
+            autoconf automake autopoint libtool libltdl-dev pkg-config \
+            zlib1g-dev libstdc++6 \
+            cmake libffi-dev libssl-dev build-essential ccache lbzip2
+
+      - name: Install buildozer + pinned python-for-android
+        run: |
+          python -m pip install --upgrade pip
+          # buildozer 1.6.0 pins cython<3.0 which conflicts with modern p4a
+          # (Python 3.14 / Kivy 2.3.1 need Cython 3.x); 1.5.0 has no such pin.
+          pip install --upgrade "Cython>=3.0,<3.2" \
+            "buildozer==1.5.0" "python-for-android==2026.5.9"
+
+      - name: Verify the bundled FFmpeg executables are arm64 ELF
+        working-directory: android
+        run: |
+          test -x src/assets/bin/arm64-v8a/ffmpeg
+          test -x src/assets/bin/arm64-v8a/ffprobe
+          python - <<'PY'
+          for path in ("src/assets/bin/arm64-v8a/ffmpeg",
+                       "src/assets/bin/arm64-v8a/ffprobe"):
+              head = open(path, "rb").read(20)
+              assert head[:4] == b"\x7fELF" and head[4] == 2
+              assert int.from_bytes(head[18:20], "little") == 183
+              print("valid arm64 ELF:", path)
+          PY
+
+      # Speed up repeat builds; a missing/corrupt cache simply rebuilds.
+      # Cache only the stable, expensive downloads (Android SDK/NDK, Gradle).
+      # The project-local android/.buildozer holds the target Python venv whose
+      # pip state does not survive caching (BuildDependencyInstallError /
+      # "no matching distribution" failures), so it is rebuilt fresh every run.
+      - name: Cache buildozer toolchain
+        uses: actions/cache@v4
+        with:
+          key: buildozer-${{ runner.os }}-p4a2026.5.9-v3-${{ hashFiles('android/buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-p4a2026.5.9-v3-
+          path: |
+            ~/.buildozer
+            ~/.gradle
+
+      - name: Build debug APK with buildozer
+        working-directory: android
+        shell: bash
+        run: |
+          set -o pipefail
+          # Keep the full log on disk; on failure surface the relevant tail
+          # as workflow annotations (api.github.com exposes these even when
+          # the full log download host is unreachable).
+          if ! buildozer -v android debug 2>&1 | tee buildozer-build.log; then
+            echo "::group::buildozer failure tail"
+            tail -n 120 buildozer-build.log || true
+            echo "::endgroup::"
+            grep -E "(Error|ERROR|FAILURE|Exception|Traceback|failed to|No matching|Could not)" buildozer-build.log \
+              | tail -n 20 | while IFS= read -r line; do
+              echo "::error title=buildozer::${line:0:400}"
+            done
+            exit 1
+          fi
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: buildozer-build-log
+          path: android/buildozer-build.log
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Collect the APK
+        id: apk
+        run: |
+          APK=$(find android/bin -name "*.apk" -type f | head -1)
+          test -n "$APK"
+          cp "$APK" AllVideoDownloader-3.0.0-arm64-v8a-debug.apk
+          ls -lh AllVideoDownloader-3.0.0-arm64-v8a-debug.apk
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: Verify APK contents (manifest, FFmpeg, fonts, engine)
+        working-directory: android
+        shell: bash
+        run: |
+          set -u
+          APK=$(find bin -name "*.apk" -type f | head -1)
+          test -n "$APK" || { echo "::error title=APK verify::no APK produced"; exit 1; }
+          pip install -q "androguard==4.1.4"
+          python - "$APK" <<'PY'
+          import sys, zipfile, tarfile, tempfile, pathlib
+
+          failures = []
+          apk = pathlib.Path(sys.argv[1])
+          summary = ["# APK verification", "", f"Artifact: `{apk}`"]
+          try:
+              if not zipfile.is_zipfile(apk):
+                  raise AssertionError("APK is not a valid zip")
+              with zipfile.ZipFile(apk) as z:
+                  bad = z.testzip()
+                  if bad:
+                      raise AssertionError(f"corrupt entry in APK: {bad}")
+                  names = z.namelist()
+                  libs = sorted({n.split("/")[1] for n in names
+                                 if n.startswith("lib/") and len(n.split("/")) > 2})
+                  summary.append(f"- native ABIs in APK: {libs}")
+                  if "arm64-v8a" not in libs:
+                      failures.append("no arm64-v8a native libs")
+                  if "assets/private.tar" not in names:
+                      raise AssertionError("p4a private.tar missing")
+                  with tempfile.TemporaryDirectory() as td:
+                      z.extract("assets/private.tar", td)
+                      with tarfile.open(pathlib.Path(td) / "assets/private.tar") as tar:
+                          members = tar.getnames()
+                          summary.append(f"- private.tar entries: {len(members)}")
+                          def must_have(needle):
+                              if not any(needle in m for m in members):
+                                  failures.append(f"missing in private.tar: {needle}")
+                          for needle in ("assets/bin/arm64-v8a/ffmpeg",
+                                        "assets/bin/arm64-v8a/ffprobe",
+                                        "assets/fonts/Vazirmatn-Regular.ttf",
+                                        "assets/fonts/Vazirmatn-Bold.ttf",
+                                        "main.py", "avd/ui/app.py", "avd/core/media.py"):
+                              must_have(needle)
+                          ff_matches = [m for m in members
+                                        if m.endswith("bin/arm64-v8a/ffmpeg")]
+                          if ff_matches:
+                              head = tar.extractfile(ff_matches[0]).read(20)
+                              if not (head[:4] == b"\x7fELF" and head[4] == 2):
+                                  failures.append("ffmpeg is not ELF64")
+                              elif int.from_bytes(head[18:20], "little") != 183:
+                                  failures.append("ffmpeg is not AArch64 (e_machine!=183)")
+
+              # Manifest via androguard (pure-python binary XML parser)
+              from androguard.core.apk import APK
+              a = APK(str(apk))
+              pkg = a.get_package()
+              summary.append(f"- package: `{pkg}`")
+              if pkg != "ir.avd.allvideodownloader":
+                  failures.append(f"unexpected package name: {pkg}")
+              if int(a.get_min_sdk_version() or 0) < 29:
+                  failures.append(f"minSdk below 29: {a.get_min_sdk_version()}")
+              perms = set(a.get_permissions())
+              for p in ("android.permission.INTERNET",
+                        "android.permission.ACCESS_NETWORK_STATE",
+                        "android.permission.WAKE_LOCK"):
+                  if p not in perms:
+                      failures.append(f"permission missing: {p}")
+              summary.append(f"- permissions: {sorted(perms)}")
+              axml = a.get_android_manifest_axml()
+              dump = axml.get_xml().decode("utf-8", "replace") if axml is not None else ""
+              if "android.intent.action.SEND" not in dump:
+                  failures.append("share-sheet SEND intent filter missing")
+              else:
+                  summary.append("- share-sheet intent filter present")
+              # no storage permission should be requested
+              for p in perms:
+                  if "EXTERNAL_STORAGE" in p or "MANAGE_STORAGE" in p:
+                      failures.append(f"unexpected storage permission: {p}")
+          except Exception as exc:  # noqa: BLE001 — report, then fail the step
+              failures.append(f"verification crashed: {type(exc).__name__}: {exc}")
+
+          summary.append("")
+          if failures:
+              summary.append("## FAILED")
+              summary += [f"- {f}" for f in failures]
+              for f in failures:
+                  print(f"::error title=APK verify::{f}")
+          else:
+              summary.append("## ALL CHECKS PASSED")
+              print("APK structure and manifest checks OK")
+          pathlib.Path("verify-summary.md").write_text("\n".join(summary))
+          sys.exit(1 if failures else 0)
+          PY
+          cat verify-summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload APK as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AllVideoDownloader-APK
+          path: AllVideoDownloader-3.0.0-arm64-v8a-debug.apk
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Publish / refresh the rolling GitHub release with the APK
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG=android-v3.0.0
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" AllVideoDownloader-3.0.0-arm64-v8a-debug.apk \
+              --clobber
+          else
+            gh release create "$TAG" \
+              AllVideoDownloader-3.0.0-arm64-v8a-debug.apk \
+              --title "All Video Downloader — Android v3.0.0" \
+              --prerelease \
+              --notes "Mobile rewrite (KivyMD, Persian RTL UI) with the desktop
+              link engine, bundled arm64-v8a FFmpeg/FFprobe and yt-dlp.
+              Debug-signed APK for sideloading (minSdk 29)."
+          fi
+
+      # Keep a copy of the built APK inside the branch itself. Runs only on
+      # pushes (not PR runs); pushes made with GITHUB_TOKEN never trigger new
+      # workflow runs, so this cannot recurse.
+      - name: Commit built APK back to the branch
+        if: github.event_name == 'push'
+        working-directory: android
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          APK=$(find bin -name "*.apk" -type f | head -1)
+          mkdir -p prebuilt
+          cp "$APK" prebuilt/AllVideoDownloader-3.0.0-arm64-v8a-debug.apk
+          (cd prebuilt && sha256sum AllVideoDownloader-3.0.0-arm64-v8a-debug.apk \
+            > SHA256SUMS.txt)
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -f prebuilt/AllVideoDownloader-3.0.0-arm64-v8a-debug.apk \
+                   prebuilt/SHA256SUMS.txt
+          if git diff --cached --quiet; then
+            echo "APK byte-identical to the committed one — nothing to do"
+            exit 0
+          fi
+          git commit -m "chore(android): publish built arm64-v8a APK (v3.0.0) [skip ci]"
+          git push "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:${GITHUB_REF_NAME}"

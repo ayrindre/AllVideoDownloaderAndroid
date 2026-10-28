@@ -1,0 +1,7 @@
+<!-- Injected into the main activity's <intent-filter> list by python-for-android.
+     Lets the app receive a video/page link shared from any other app. -->
+<intent-filter>
+    <action android:name="android.intent.action.SEND" />
+    <category android:name="android.intent.category.DEFAULT" />
+    <data android:mimeType="text/plain" />
+</intent-filter>
