@@ -139,58 +139,98 @@ jobs:
 
       - name: Verify APK contents (manifest, FFmpeg, fonts, engine)
         working-directory: android
+        shell: bash
         run: |
-          set -e
+          set -u
           APK=$(find bin -name "*.apk" -type f | head -1)
-          test -n "$APK"
+          test -n "$APK" || { echo "::error title=APK verify::no APK produced"; exit 1; }
+          pip install -q "androguard==4.1.4"
           python - "$APK" <<'PY'
           import sys, zipfile, tarfile, tempfile, pathlib
+
+          failures = []
           apk = pathlib.Path(sys.argv[1])
-          assert zipfile.is_zipfile(apk), "APK is not a valid zip"
-          with zipfile.ZipFile(apk) as z:
-              bad = z.testzip()
-              assert bad is None, f"corrupt entry in APK: {bad}"
-              names = z.namelist()
-              # native arm64 libraries (python, SDL2, …)
-              assert any(n.startswith("lib/arm64-v8a/") for n in names), "no arm64 native libs"
-              assert "assets/private.tar" in names, "p4a private.tar missing"
-              with tempfile.TemporaryDirectory() as td:
-                  z.extract("assets/private.tar", td)
-                  with tarfile.open(pathlib.Path(td) / "assets/private.tar") as tar:
-                      members = tar.getnames()
-                      def must_have(needle):
-                          assert any(needle in m for m in members), f"missing in private.tar: {needle}"
-                      must_have("assets/bin/arm64-v8a/ffmpeg")
-                      must_have("assets/bin/arm64-v8a/ffprobe")
-                      must_have("assets/fonts/Vazirmatn-Regular.ttf")
-                      must_have("assets/fonts/Vazirmatn-Bold.ttf")
-                      must_have("main.py")
-                      must_have("avd/ui/app.py")
-                      must_have("avd/core/media.py")
-                      ff = [m for m in members if m.endswith("bin/arm64-v8a/ffmpeg")][0]
-                      f = tar.extractfile(ff)
-                      head = f.read(20)
-                      assert head[:4] == b"\x7fELF" and head[4] == 2, "ffmpeg not ELF64"
-                      assert int.from_bytes(head[18:20], "little") == 183, "ffmpeg not AArch64"
-                      print("private.tar entries checked:", len(members))
-          print("APK structure OK")
+          summary = ["# APK verification", "", f"Artifact: `{apk}`"]
+          try:
+              if not zipfile.is_zipfile(apk):
+                  raise AssertionError("APK is not a valid zip")
+              with zipfile.ZipFile(apk) as z:
+                  bad = z.testzip()
+                  if bad:
+                      raise AssertionError(f"corrupt entry in APK: {bad}")
+                  names = z.namelist()
+                  libs = sorted({n.split("/")[1] for n in names
+                                 if n.startswith("lib/") and len(n.split("/")) > 2})
+                  summary.append(f"- native ABIs in APK: {libs}")
+                  if "arm64-v8a" not in libs:
+                      failures.append("no arm64-v8a native libs")
+                  if "assets/private.tar" not in names:
+                      raise AssertionError("p4a private.tar missing")
+                  with tempfile.TemporaryDirectory() as td:
+                      z.extract("assets/private.tar", td)
+                      with tarfile.open(pathlib.Path(td) / "assets/private.tar") as tar:
+                          members = tar.getnames()
+                          summary.append(f"- private.tar entries: {len(members)}")
+                          def must_have(needle):
+                              if not any(needle in m for m in members):
+                                  failures.append(f"missing in private.tar: {needle}")
+                          for needle in ("assets/bin/arm64-v8a/ffmpeg",
+                                        "assets/bin/arm64-v8a/ffprobe",
+                                        "assets/fonts/Vazirmatn-Regular.ttf",
+                                        "assets/fonts/Vazirmatn-Bold.ttf",
+                                        "main.py", "avd/ui/app.py", "avd/core/media.py"):
+                              must_have(needle)
+                          ff_matches = [m for m in members
+                                        if m.endswith("bin/arm64-v8a/ffmpeg")]
+                          if ff_matches:
+                              head = tar.extractfile(ff_matches[0]).read(20)
+                              if not (head[:4] == b"\x7fELF" and head[4] == 2):
+                                  failures.append("ffmpeg is not ELF64")
+                              elif int.from_bytes(head[18:20], "little") != 183:
+                                  failures.append("ffmpeg is not AArch64 (e_machine!=183)")
+
+              # Manifest via androguard (pure-python binary XML parser)
+              from androguard.core.apk import APK
+              a = APK(str(apk))
+              pkg = a.get_package()
+              summary.append(f"- package: `{pkg}`")
+              if pkg != "ir.avd.allvideodownloader":
+                  failures.append(f"unexpected package name: {pkg}")
+              if int(a.get_min_sdk_version() or 0) < 29:
+                  failures.append(f"minSdk below 29: {a.get_min_sdk_version()}")
+              perms = set(a.get_permissions())
+              for p in ("android.permission.INTERNET",
+                        "android.permission.ACCESS_NETWORK_STATE",
+                        "android.permission.WAKE_LOCK"):
+                  if p not in perms:
+                      failures.append(f"permission missing: {p}")
+              summary.append(f"- permissions: {sorted(perms)}")
+              axml = a.get_android_manifest_axml()
+              dump = axml.get_xml().decode("utf-8", "replace") if axml is not None else ""
+              if "android.intent.action.SEND" not in dump:
+                  failures.append("share-sheet SEND intent filter missing")
+              else:
+                  summary.append("- share-sheet intent filter present")
+              # no storage permission should be requested
+              for p in perms:
+                  if "EXTERNAL_STORAGE" in p or "MANAGE_STORAGE" in p:
+                      failures.append(f"unexpected storage permission: {p}")
+          except Exception as exc:  # noqa: BLE001 — report, then fail the step
+              failures.append(f"verification crashed: {type(exc).__name__}: {exc}")
+
+          summary.append("")
+          if failures:
+              summary.append("## FAILED")
+              summary += [f"- {f}" for f in failures]
+              for f in failures:
+                  print(f"::error title=APK verify::{f}")
+          else:
+              summary.append("## ALL CHECKS PASSED")
+              print("APK structure and manifest checks OK")
+          pathlib.Path("verify-summary.md").write_text("\n".join(summary))
+          sys.exit(1 if failures else 0)
           PY
-          # Manifest-level checks with the SDK's aapt
-          AAPT=$(find "$HOME/.buildozer" -type f -name aapt | head -1)
-          [ -z "$AAPT" ] && AAPT=$(find "$HOME/.buildozer" -type f -name aapt2 | head -1)
-          if [ -n "$AAPT" ]; then
-            "$AAPT" dump badging "$APK" > badging.txt 2>/dev/null || true
-            grep -q "package: name='ir.avd.allvideodownloader'" badging.txt
-            grep -q "sdkVersion:'29'" badging.txt
-            grep -q "native-code: 'arm64-v8a'" badging.txt
-            grep -q "android.permission.INTERNET" badging.txt
-            grep -q "android.permission.WAKE_LOCK" badging.txt
-            grep -q "android.intent.action.SEND" badging.txt
-            echo "manifest checks OK"
-            cat badging.txt | head -12
-          else
-            echo "::warning::aapt not found, skipped manifest checks"
-          fi
+          cat verify-summary.md >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload APK as a workflow artifact
         uses: actions/upload-artifact@v4
